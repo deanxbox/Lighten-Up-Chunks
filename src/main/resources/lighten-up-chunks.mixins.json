@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"package": "io.github.dean.lightenupchunks.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"mixins": [
+		"accessor.ChunkMapInvoker",
+		"accessor.ServerChunkCacheAccessor"
+	],
+	"client": [
+		"client.MinecraftPauseMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

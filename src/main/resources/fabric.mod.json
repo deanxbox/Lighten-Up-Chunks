@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "lighten-up-chunks",
+  "version": "${version}",
+  "name": "Lighten Up, Chunks!",
+  "description": "Server-side chunk relighting for existing worlds, aimed at repairing broken saved lighting in bulk.",
+  "authors": ["deanxbox"],
+  "contact": {
+    "sources": "https://github.com/deanxbox/lighten-up-chunks"
+  },
+  "license": "MIT",
+  "icon": "assets/lighten-up-chunks/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["io.github.dean.lightenupchunks.LightenUpChunks"],
+    "client": ["io.github.dean.lightenupchunks.LightenUpChunksClient"],
+    "modmenu": ["io.github.dean.lightenupchunks.client.LightenUpChunksModMenu"]
+  },
+  "mixins": ["lighten-up-chunks.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.18.5",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
