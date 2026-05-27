@@ -43,11 +43,7 @@ public final class LucDimensions {
 	}
 
 	public static String asString(ServerLevel level) {
-		String reflected = findDimensionKeyString(level);
-		if (reflected != null) {
-			return reflected;
-		}
-		return OVERWORLD;
+		return level.dimension().identifier().toString();
 	}
 
 	public static String asString(Object dimensionKey) {

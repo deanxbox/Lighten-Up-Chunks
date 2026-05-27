@@ -1,6 +1,5 @@
 package io.github.dean.lightenupchunks.task;
 
-import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.WorldPathResolver;
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -25,9 +24,9 @@ final class PersistedLightInspector implements AutoCloseable {
 	private boolean currentHasSkyLight;
 
 	public boolean chunkNeedsLighting(ServerLevel level, ChunkPos chunkPos) throws IOException {
-		Path regionDirectory = resolveRegionDirectory(level, WorldPathResolver.resolveWorldRoot(level));
-		int regionX = Math.floorDiv(chunkPos.x, 32);
-		int regionZ = Math.floorDiv(chunkPos.z, 32);
+		Path regionDirectory = resolveRegionDirectory(level);
+		int regionX = Math.floorDiv(chunkPos.x(), 32);
+		int regionZ = Math.floorDiv(chunkPos.z(), 32);
 		Path regionFilePath = regionDirectory.resolve("r." + regionX + "." + regionZ + ".mca");
 		if (!Files.exists(regionFilePath)) {
 			return true;
@@ -79,22 +78,8 @@ final class PersistedLightInspector implements AutoCloseable {
 		return true;
 	}
 
-	private static Path resolveRegionDirectory(ServerLevel level, Path rootPath) {
-		String dimension = LucDimensions.asString(level);
-		if (dimension.equals(LucDimensions.OVERWORLD)) {
-			return rootPath.resolve("region");
-		}
-		if (dimension.equals(LucDimensions.NETHER)) {
-			return rootPath.resolve("DIM-1").resolve("region");
-		}
-		if (dimension.equals(LucDimensions.END)) {
-			return rootPath.resolve("DIM1").resolve("region");
-		}
-
-		return rootPath.resolve("dimensions")
-			.resolve(LucDimensions.namespace(dimension))
-			.resolve(LucDimensions.path(dimension))
-			.resolve("region");
+	private static Path resolveRegionDirectory(ServerLevel level) {
+		return WorldPathResolver.resolveDimensionRoot(level).resolve("region");
 	}
 
 	@Override

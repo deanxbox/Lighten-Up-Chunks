@@ -1,8 +1,9 @@
 {
 	"required": true,
 	"package": "io.github.dean.lightenupchunks.mixin",
-	"compatibilityLevel": "JAVA_21",
+	"compatibilityLevel": "JAVA_25",
 	"mixins": [
+		"accessor.ChunkAccessAccessor",
 		"accessor.ChunkMapInvoker",
 		"accessor.ServerChunkCacheAccessor"
 	],

@@ -56,6 +56,37 @@ public final class WorldPathResolver {
 		return resolveWorldRoot(server);
 	}
 
+	public static Path resolveDimensionRoot(ServerLevel level) {
+		try {
+			MinecraftServer server = resolveServer(level);
+			if (server != null) {
+				LevelStorageSource.LevelStorageAccess storageAccess = findStorageAccess(server);
+				return storageAccess.getDimensionPath(level.dimension()).toAbsolutePath().normalize();
+			}
+		} catch (ReflectiveOperationException | RuntimeException exception) {
+			LightenUpChunks.LOGGER.debug("Failed to resolve dimension path through LevelStorageAccess", exception);
+		}
+
+		return resolveLegacyDimensionRoot(level, resolveWorldRoot(level));
+	}
+
+	private static Path resolveLegacyDimensionRoot(ServerLevel level, Path rootPath) {
+		String dimension = LucDimensions.asString(level);
+		if (dimension.equals(LucDimensions.OVERWORLD)) {
+			return rootPath;
+		}
+		if (dimension.equals(LucDimensions.NETHER)) {
+			return rootPath.resolve("DIM-1");
+		}
+		if (dimension.equals(LucDimensions.END)) {
+			return rootPath.resolve("DIM1");
+		}
+
+		return rootPath.resolve("dimensions")
+			.resolve(LucDimensions.namespace(dimension))
+			.resolve(LucDimensions.path(dimension));
+	}
+
 	private static LevelStorageSource.LevelStorageAccess findStorageAccess(MinecraftServer server) throws ReflectiveOperationException {
 		Class<?> type = server.getClass();
 		while (type != null) {
@@ -202,8 +233,11 @@ public final class WorldPathResolver {
 	}
 
 	private static Path resolveFromFilesystem(String levelId) {
+		return resolveFromFilesystem(Path.of("").toAbsolutePath().normalize(), levelId);
+	}
+
+	static Path resolveFromFilesystem(Path workingDirectory, String levelId) {
 		List<Path> searchRoots = new ArrayList<>();
-		Path workingDirectory = Path.of("").toAbsolutePath().normalize();
 		searchRoots.add(workingDirectory);
 		searchRoots.add(workingDirectory.resolve("saves"));
 		searchRoots.add(workingDirectory.resolve(".minecraft"));
@@ -280,7 +314,7 @@ public final class WorldPathResolver {
 		return null;
 	}
 
-	private static Path detectWorldRoot(Path candidate) {
+	static Path detectWorldRoot(Path candidate) {
 		if (candidate == null) {
 			return null;
 		}

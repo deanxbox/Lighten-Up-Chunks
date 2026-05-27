@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerBossEvent;
@@ -21,6 +22,7 @@ public final class LucProgressBar {
 
 	public LucProgressBar() {
 		this.bossBar = new ServerBossEvent(
+			UUID.randomUUID(),
 			TextComponents.literal("Lighten Up, Chunks!"),
 			enumValue(BossEvent.BossBarColor.class, "GREEN"),
 			enumValue(BossEvent.BossBarOverlay.class, "PROGRESS")
@@ -50,12 +52,19 @@ public final class LucProgressBar {
 		}
 		if (config.bossBarShowCounts) {
 			parts.add(task.getProcessedChunks() + "/" + task.getTotalChunks());
+			parts.add("relit " + task.getRelitChunks());
+			if (task.getSkippedChunks() > 0L) {
+				parts.add("skip " + task.getSkippedChunks());
+			}
+			if (task.getFailedChunks() > 0L) {
+				parts.add("fail " + task.getFailedChunks());
+			}
 		}
 		if (config.bossBarShowRemaining) {
 			parts.add(remaining + " left");
 		}
 		if (config.bossBarShowCurrentChunk && currentChunk != null) {
-			parts.add("chunk " + currentChunk.x + ", " + currentChunk.z);
+			parts.add("chunk " + currentChunk.x() + ", " + currentChunk.z());
 		}
 		if (config.bossBarShowRate) {
 			parts.add(RATE_FORMAT.format(rate) + " c/s");

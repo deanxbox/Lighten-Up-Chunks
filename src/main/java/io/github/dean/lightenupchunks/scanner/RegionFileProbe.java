@@ -1,6 +1,5 @@
 package io.github.dean.lightenupchunks.scanner;
 
-import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.WorldPathResolver;
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,16 +15,16 @@ import java.util.regex.Pattern;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 
-final class RegionFileProbe {
+public final class RegionFileProbe {
 	private static final Pattern REGION_FILE_PATTERN = Pattern.compile("r\\.(-?\\d+)\\.(-?\\d+)\\.mca");
 	private final Map<Long, BitSet> headerCache = new HashMap<>();
 
 	public boolean chunkExists(ServerLevel level, ChunkPos chunkPos) throws IOException {
-		int regionX = Math.floorDiv(chunkPos.x, 32);
-		int regionZ = Math.floorDiv(chunkPos.z, 32);
+		int regionX = Math.floorDiv(chunkPos.x(), 32);
+		int regionZ = Math.floorDiv(chunkPos.z(), 32);
 		BitSet occupancy = loadHeader(level, regionX, regionZ);
-		int localX = Math.floorMod(chunkPos.x, 32);
-		int localZ = Math.floorMod(chunkPos.z, 32);
+		int localX = Math.floorMod(chunkPos.x(), 32);
+		int localZ = Math.floorMod(chunkPos.z(), 32);
 		return occupancy.get(localZ * 32 + localX);
 	}
 
@@ -34,7 +33,7 @@ final class RegionFileProbe {
 	}
 
 	public List<ChunkPos> scanAllExistingChunks(ServerLevel level) throws IOException {
-		Path regionDirectory = resolveRegionDirectory(level, WorldPathResolver.resolveWorldRoot(level));
+		Path regionDirectory = resolveRegionDirectory(level);
 		if (!Files.isDirectory(regionDirectory)) {
 			return List.of();
 		}
@@ -73,7 +72,7 @@ final class RegionFileProbe {
 			return cached;
 		}
 
-		Path regionFile = resolveRegionDirectory(level, WorldPathResolver.resolveWorldRoot(level))
+		Path regionFile = resolveRegionDirectory(level)
 			.resolve("r." + regionX + "." + regionZ + ".mca");
 		BitSet loaded = readHeader(regionFile);
 		headerCache.put(cacheKey, loaded);
@@ -105,21 +104,7 @@ final class RegionFileProbe {
 		return occupancy;
 	}
 
-	private static Path resolveRegionDirectory(ServerLevel level, Path rootPath) {
-		String dimension = LucDimensions.asString(level);
-		if (dimension.equals(LucDimensions.OVERWORLD)) {
-			return rootPath.resolve("region");
-		}
-		if (dimension.equals(LucDimensions.NETHER)) {
-			return rootPath.resolve("DIM-1").resolve("region");
-		}
-		if (dimension.equals(LucDimensions.END)) {
-			return rootPath.resolve("DIM1").resolve("region");
-		}
-
-		return rootPath.resolve("dimensions")
-			.resolve(LucDimensions.namespace(dimension))
-			.resolve(LucDimensions.path(dimension))
-			.resolve("region");
+	private static Path resolveRegionDirectory(ServerLevel level) {
+		return WorldPathResolver.resolveDimensionRoot(level).resolve("region");
 	}
 }

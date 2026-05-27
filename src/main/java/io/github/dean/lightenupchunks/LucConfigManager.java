@@ -2,6 +2,7 @@ package io.github.dean.lightenupchunks;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import io.github.dean.lightenupchunks.task.RelightMode;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
@@ -44,7 +45,7 @@ public final class LucConfigManager {
 	}
 
 	public static LucConfig defaults() {
-		return new LucConfig();
+		return sanitize(new LucConfig());
 	}
 
 	public static LucConfig update(Consumer<LucConfig> updater) throws IOException {
@@ -58,7 +59,7 @@ public final class LucConfigManager {
 
 	public static LucConfig reset() throws IOException {
 		synchronized (LucConfigManager.class) {
-			LucConfig defaults = new LucConfig();
+			LucConfig defaults = defaults();
 			write(defaults);
 			config = defaults;
 			return defaults;
@@ -66,7 +67,7 @@ public final class LucConfigManager {
 	}
 
 	private static LucConfig load() {
-		LucConfig defaults = new LucConfig();
+		LucConfig defaults = defaults();
 		try {
 			Files.createDirectories(CONFIG_PATH.getParent());
 			if (!Files.exists(CONFIG_PATH)) {
@@ -80,12 +81,32 @@ public final class LucConfigManager {
 					write(defaults);
 					return defaults;
 				}
-				return loaded;
+				return sanitize(loaded);
 			}
 		} catch (IOException exception) {
 			LightenUpChunks.LOGGER.warn("Failed to read {}", CONFIG_PATH, exception);
 			return defaults;
 		}
+	}
+
+	private static LucConfig sanitize(LucConfig config) {
+		LucConfig defaults = new LucConfig();
+		RelightMode fallbackMode = config.calculateOnlyEmptyLightChunks ? RelightMode.MISSING_ONLY : RelightMode.FULL;
+		try {
+			config.defaultRelightMode = RelightMode.fromSerializedName(config.defaultRelightMode).serializedName();
+		} catch (IllegalArgumentException ignored) {
+			config.defaultRelightMode = fallbackMode.serializedName();
+		}
+		if (config.maxInFlightChunks < 0) {
+			config.maxInFlightChunks = defaults.maxInFlightChunks;
+		}
+		if (config.maxRelightsPerTick < 0) {
+			config.maxRelightsPerTick = defaults.maxRelightsPerTick;
+		}
+		if (config.saveFlushIntervalSeconds <= 0) {
+			config.saveFlushIntervalSeconds = defaults.saveFlushIntervalSeconds;
+		}
+		return config;
 	}
 
 	private static void write(LucConfig config) throws IOException {

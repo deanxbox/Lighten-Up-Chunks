@@ -1,9 +1,13 @@
 package io.github.dean.lightenupchunks.task;
 
 import io.github.dean.lightenupchunks.LucDimensions;
+import io.github.dean.lightenupchunks.LucConfigManager;
 import io.github.dean.lightenupchunks.LightenUpChunks;
+import io.github.dean.lightenupchunks.VoxyCompat;
+import io.github.dean.lightenupchunks.mixin.accessor.ChunkAccessAccessor;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkMapInvoker;
 import io.github.dean.lightenupchunks.mixin.accessor.ServerChunkCacheAccessor;
+import io.github.dean.lightenupchunks.scanner.RegionFileProbe;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,14 +32,19 @@ import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ImposterProtoChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 
 public final class ChunkLightWorker {
 	private static final int INSPECTION_THREADS = Math.max(2, Math.min(6, Runtime.getRuntime().availableProcessors() / 2));
-	private static final int LOAD_RADIUS = 1;
+	private static final int RETAINED_AREA_RADIUS = 1;
+	private static final int LOAD_TICKET_RADIUS = 0;
+	private static final int NO_SAVE_GUARD_RADIUS = RETAINED_AREA_RADIUS;
 	private static final TicketType LOAD_TICKET_TYPE = TicketType.FORCED;
 
 	private final Queue<PersistedLightInspector> inspectors = new ConcurrentLinkedQueue<>();
 	private final Map<ChunkPos, Integer> retainedLightDataCounts = new HashMap<>();
+	private final Map<ChunkPos, Integer> retainedTicketCounts = new HashMap<>();
+	private final RegionFileProbe regionFileProbe = new RegionFileProbe();
 	private final ThreadLocal<PersistedLightInspector> inspectorLocal = ThreadLocal.withInitial(() -> {
 		PersistedLightInspector inspector = new PersistedLightInspector();
 		inspectors.add(inspector);
@@ -47,22 +56,30 @@ public final class ChunkLightWorker {
 		return thread;
 	});
 
-	public void submitChunks(ServerLevel level, LightTask task, Map<ChunkPos, InFlightChunk> inFlightChunks, int maxInFlight) {
+	public int submitChunks(ServerLevel level, LightTask task, Map<ChunkPos, InFlightChunk> inFlightChunks, int maxInFlight) {
+		int skipped = 0;
 		while (inFlightChunks.size() < maxInFlight) {
 			ChunkPos chunkPos = task.pollNextChunk();
 			if (chunkPos == null) {
-				return;
+				return skipped;
 			}
 
 			List<ChunkPos> retainedChunks = ticketArea(chunkPos);
+			if (!allChunksExist(level, ticketArea(chunkPos))) {
+				skipped++;
+				continue;
+			}
 			retainLightData(level, retainedChunks);
-			CompletableFuture<?> loadFuture = level.getChunkSource().addTicketAndLoadWithRadius(LOAD_TICKET_TYPE, chunkPos, LOAD_RADIUS);
+			CompletableFuture<?> loadFuture = loadRetainedArea(level, retainedChunks);
 			inFlightChunks.put(chunkPos, new InFlightChunk(chunkPos, retainedChunks, loadFuture, createInspectionFuture(level, task, chunkPos)));
 		}
+		return skipped;
 	}
 
-	public int processLoadedChunks(ServerLevel level, Map<ChunkPos, InFlightChunk> inFlightChunks) {
-		int processed = 0;
+	public ProcessResult processLoadedChunks(ServerLevel level, Map<ChunkPos, InFlightChunk> inFlightChunks) {
+		int relit = 0;
+		int skipped = 0;
+		List<FailureRecord> failures = new ArrayList<>();
 		int maxRelightsStartedThisTick = maxRelightsStartedThisTick(level);
 		int startedThisTick = 0;
 		Iterator<Map.Entry<ChunkPos, InFlightChunk>> iterator = inFlightChunks.entrySet().iterator();
@@ -82,7 +99,7 @@ public final class ChunkLightWorker {
 						continue;
 					}
 					if (!inFlightChunk.shouldRelight()) {
-						processed++;
+						skipped++;
 						finished = true;
 						continue;
 					}
@@ -90,7 +107,7 @@ public final class ChunkLightWorker {
 						continue;
 					}
 
-					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
+					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x(), chunkPos.z());
 					if (levelChunk == null) {
 						continue;
 					}
@@ -108,17 +125,19 @@ public final class ChunkLightWorker {
 				if (relitChunk instanceof LevelChunk levelChunk) {
 					levelChunk.markUnsaved();
 				}
-				saveRelitArea(level, inFlightChunk.chunkPos());
-				processed++;
+				saveRelitArea(level, inFlightChunk.retainedChunks());
+				relit++;
 				finished = true;
 			} catch (CompletionException exception) {
 				finished = true;
+				Throwable cause = unwrap(exception);
 				LightenUpChunks.LOGGER.error(
 					"Failed to relight chunk {} in {}",
 					chunkPos,
 					LucDimensions.asString(level),
-					unwrap(exception)
+					cause
 				);
+				failures.add(new FailureRecord(chunkPos, failureMessage(cause)));
 			} catch (RuntimeException exception) {
 				finished = true;
 				LightenUpChunks.LOGGER.error(
@@ -127,6 +146,7 @@ public final class ChunkLightWorker {
 					LucDimensions.asString(level),
 					exception
 				);
+				failures.add(new FailureRecord(chunkPos, failureMessage(exception)));
 			} finally {
 				if (finished) {
 					iterator.remove();
@@ -134,7 +154,7 @@ public final class ChunkLightWorker {
 				}
 			}
 		}
-		return processed;
+		return new ProcessResult(relit, skipped, failures);
 	}
 
 	public void releaseAll(ServerLevel level, Map<ChunkPos, InFlightChunk> inFlightChunks) {
@@ -145,7 +165,9 @@ public final class ChunkLightWorker {
 	}
 
 	private void releaseChunk(ServerLevel level, ChunkPos chunkPos, InFlightChunk inFlightChunk) {
-		level.getChunkSource().removeTicketWithRadius(LOAD_TICKET_TYPE, chunkPos, LOAD_RADIUS);
+		inFlightChunk.cancelPendingWork();
+		preventNewChunkWrites(level, chunkPos);
+		releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
 		releaseLightData(level, inFlightChunk.retainedChunks());
 	}
 
@@ -181,15 +203,19 @@ public final class ChunkLightWorker {
 			.thenApply(relitChunk -> chunk);
 	}
 
-	private void saveRelitArea(ServerLevel level, ChunkPos centerChunkPos) {
+	private void saveRelitArea(ServerLevel level, List<ChunkPos> retainedChunks) {
 		ServerChunkCache chunkSource = level.getChunkSource();
 		ChunkMapInvoker chunkMap = (ChunkMapInvoker) ((ServerChunkCacheAccessor) chunkSource).lightenupchunks$getChunkMap();
-		for (ChunkPos retainedChunkPos : ticketArea(centerChunkPos)) {
-			LevelChunk retainedChunk = chunkSource.getChunkNow(retainedChunkPos.x, retainedChunkPos.z);
+		for (ChunkPos retainedChunkPos : retainedChunks) {
+			if (!shouldSaveChunk(level, retainedChunkPos)) {
+				continue;
+			}
+			LevelChunk retainedChunk = chunkSource.getChunkNow(retainedChunkPos.x(), retainedChunkPos.z());
 			if (retainedChunk != null) {
 				retainedChunk.markUnsaved();
 				chunkMap.lightenupchunks$saveChunk(retainedChunk);
 				broadcastRelitChunk(chunkMap, retainedChunk);
+				VoxyCompat.notifyChunkRelit(level, retainedChunk);
 			}
 		}
 	}
@@ -202,13 +228,7 @@ public final class ChunkLightWorker {
 	}
 
 	private List<ChunkPos> ticketArea(ChunkPos centerChunkPos) {
-		List<ChunkPos> retainedChunks = new ArrayList<>((LOAD_RADIUS * 2 + 1) * (LOAD_RADIUS * 2 + 1));
-		for (int dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; dx++) {
-			for (int dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; dz++) {
-				retainedChunks.add(new ChunkPos(centerChunkPos.x + dx, centerChunkPos.z + dz));
-			}
-		}
-		return retainedChunks;
+		return chunkArea(centerChunkPos, RETAINED_AREA_RADIUS);
 	}
 
 	private void retainLightData(ServerLevel level, List<ChunkPos> chunkPositions) {
@@ -220,6 +240,39 @@ public final class ChunkLightWorker {
 				retainedLightDataCounts.put(chunkPos, 1);
 			} else {
 				retainedLightDataCounts.put(chunkPos, count + 1);
+			}
+		}
+	}
+
+	private CompletableFuture<?> loadRetainedArea(ServerLevel level, List<ChunkPos> chunkPositions) {
+		List<CompletableFuture<?>> loadFutures = new ArrayList<>(chunkPositions.size());
+		for (ChunkPos chunkPos : chunkPositions) {
+			retainTicket(level, chunkPos);
+			loadFutures.add(level.getChunkSource().addTicketAndLoadWithRadius(LOAD_TICKET_TYPE, chunkPos, LOAD_TICKET_RADIUS));
+		}
+		return CompletableFuture.allOf(loadFutures.toArray(CompletableFuture[]::new));
+	}
+
+	private void retainTicket(ServerLevel level, ChunkPos chunkPos) {
+		Integer count = retainedTicketCounts.get(chunkPos);
+		if (count == null) {
+			retainedTicketCounts.put(chunkPos, 1);
+			return;
+		}
+		retainedTicketCounts.put(chunkPos, count + 1);
+	}
+
+	private void releaseRetainedAreaTickets(ServerLevel level, List<ChunkPos> chunkPositions) {
+		for (ChunkPos chunkPos : chunkPositions) {
+			Integer count = retainedTicketCounts.get(chunkPos);
+			if (count == null) {
+				continue;
+			}
+			if (count > 1) {
+				retainedTicketCounts.put(chunkPos, count - 1);
+			} else {
+				retainedTicketCounts.remove(chunkPos);
+				level.getChunkSource().removeTicketWithRadius(LOAD_TICKET_TYPE, chunkPos, LOAD_TICKET_RADIUS);
 			}
 		}
 	}
@@ -260,7 +313,79 @@ public final class ChunkLightWorker {
 		}, inspectionExecutor);
 	}
 
+	private boolean allChunksExist(ServerLevel level, List<ChunkPos> chunkPositions) {
+		try {
+			for (ChunkPos chunkPos : chunkPositions) {
+				if (!regionFileProbe.chunkExists(level, chunkPos)) {
+					return false;
+				}
+			}
+			return true;
+		} catch (IOException exception) {
+			LightenUpChunks.LOGGER.warn(
+				"Failed to inspect neighbor chunks in {}; skipping relight so no new chunks are written",
+				LucDimensions.asString(level),
+				exception
+			);
+			return false;
+		}
+	}
+
+	private boolean shouldSaveChunk(ServerLevel level, ChunkPos chunkPos) {
+		try {
+			return regionFileProbe.chunkExists(level, chunkPos);
+		} catch (IOException exception) {
+			LightenUpChunks.LOGGER.warn(
+				"Failed to verify that chunk {} in {} existed on disk; skipping save to avoid writing a new chunk",
+				chunkPos,
+				LucDimensions.asString(level),
+				exception
+			);
+			return false;
+		}
+	}
+
+	private void preventNewChunkWrites(ServerLevel level, ChunkPos centerChunkPos) {
+		for (ChunkPos chunkPos : chunkArea(centerChunkPos, NO_SAVE_GUARD_RADIUS)) {
+			if (chunkExistedOnDisk(level, chunkPos)) {
+				continue;
+			}
+			ChunkAccess loadedChunk = level.getChunkSource().getChunk(chunkPos.x(), chunkPos.z(), ChunkStatus.EMPTY, false);
+			if (loadedChunk != null && loadedChunk.isUnsaved()) {
+				((ChunkAccessAccessor) loadedChunk).lightenupchunks$setUnsaved(false);
+			}
+		}
+	}
+
+	private boolean chunkExistedOnDisk(ServerLevel level, ChunkPos chunkPos) {
+		try {
+			return regionFileProbe.chunkExists(level, chunkPos);
+		} catch (IOException exception) {
+			LightenUpChunks.LOGGER.warn(
+				"Failed to verify whether chunk {} in {} existed on disk; treating it as non-persistent to avoid writing a new chunk",
+				chunkPos,
+				LucDimensions.asString(level),
+				exception
+			);
+			return false;
+		}
+	}
+
+	private List<ChunkPos> chunkArea(ChunkPos centerChunkPos, int radius) {
+		List<ChunkPos> chunkPositions = new ArrayList<>((radius * 2 + 1) * (radius * 2 + 1));
+		for (int dx = -radius; dx <= radius; dx++) {
+			for (int dz = -radius; dz <= radius; dz++) {
+				chunkPositions.add(new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz));
+			}
+		}
+		return chunkPositions;
+	}
+
 	private int maxRelightsStartedThisTick(ServerLevel level) {
+		int configured = LucConfigManager.get().maxRelightsPerTick;
+		if (configured > 0) {
+			return configured;
+		}
 		double averageMspt = level.getServer().getAverageTickTimeNanos() / 1_000_000.0D;
 		if (averageMspt >= 45.0D) {
 			return 4;
@@ -283,6 +408,14 @@ public final class ChunkLightWorker {
 	private static Throwable unwrap(CompletionException exception) {
 		Throwable cause = exception.getCause();
 		return cause != null ? cause : exception;
+	}
+
+	private static String failureMessage(Throwable throwable) {
+		String message = throwable.getMessage();
+		if (message == null || message.isBlank()) {
+			return throwable.getClass().getSimpleName();
+		}
+		return throwable.getClass().getSimpleName() + ": " + message;
 	}
 
 	public void close() {
@@ -363,5 +496,21 @@ public final class ChunkLightWorker {
 		private boolean shouldRelight() {
 			return inspectionFuture == null || inspectionFuture.join();
 		}
+
+		private void cancelPendingWork() {
+			loadFuture.cancel(true);
+			if (inspectionFuture != null) {
+				inspectionFuture.cancel(true);
+			}
+			if (relightFuture != null) {
+				relightFuture.cancel(true);
+			}
+		}
+	}
+
+	public record FailureRecord(ChunkPos chunkPos, String message) {
+	}
+
+	public record ProcessResult(int relit, int skipped, List<FailureRecord> failures) {
 	}
 }

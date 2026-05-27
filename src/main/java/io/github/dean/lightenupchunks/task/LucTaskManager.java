@@ -3,6 +3,7 @@ package io.github.dean.lightenupchunks.task;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import io.github.dean.lightenupchunks.CommandFeedback;
+import io.github.dean.lightenupchunks.LucConfig;
 import io.github.dean.lightenupchunks.LucConfigManager;
 import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.LightenUpChunks;
@@ -11,6 +12,7 @@ import io.github.dean.lightenupchunks.TextComponents;
 import io.github.dean.lightenupchunks.WorldPathResolver;
 import io.github.dean.lightenupchunks.scanner.BoxScanner;
 import io.github.dean.lightenupchunks.scanner.ChunkRegionScanner;
+import io.github.dean.lightenupchunks.scanner.RegionFileProbe;
 import io.github.dean.lightenupchunks.scanner.RadiusScanner;
 import io.github.dean.lightenupchunks.scanner.WorldScanner;
 import java.io.IOException;
@@ -22,15 +24,19 @@ import java.text.DecimalFormat;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -39,7 +45,6 @@ import net.minecraft.world.level.ChunkPos;
 public final class LucTaskManager {
 	private static final Map<MinecraftServer, LucTaskManager> INSTANCES = Collections.synchronizedMap(new WeakHashMap<>());
 	private static final int MAX_IN_FLIGHT = Math.max(48, Math.min(256, Runtime.getRuntime().availableProcessors() * 16));
-	private static final long SAVE_FLUSH_INTERVAL_MILLIS = 30000L;
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 	private static final DecimalFormat RATE_FORMAT = new DecimalFormat("0.00");
 
@@ -56,6 +61,8 @@ public final class LucTaskManager {
 	private boolean pendingChunkSaveFlush;
 	private String configuredDimension = LucDimensions.OVERWORLD;
 	private ConfiguredScan configuredScan = ConfiguredScan.world();
+	private RelightMode configuredRelightMode = configuredDefaultRelightMode();
+	private boolean hasConfiguredSelection;
 
 	private LucTaskManager(MinecraftServer server) {
 		this.server = server;
@@ -88,25 +95,55 @@ public final class LucTaskManager {
 	}
 
 	public int startConfigured(CommandSourceStack source) throws CommandSyntaxException {
-		return startTask(source, configuredDimension, configuredScan);
+		TaskSelection selection = defaultSelection(source);
+		return startTask(source, selection.dimension(), selection.scan(), configuredRelightMode);
 	}
 
 	public int startWorld(CommandSourceStack source, String dimension) throws CommandSyntaxException {
 		configuredDimension = dimension;
 		configuredScan = ConfiguredScan.world();
-		return startTask(source, dimension, configuredScan);
+		hasConfiguredSelection = true;
+		return startTask(source, dimension, configuredScan, configuredRelightMode);
 	}
 
 	public int startRadius(CommandSourceStack source, String dimension, int radius, int centerX, int centerZ) throws CommandSyntaxException {
 		configuredDimension = dimension;
 		configuredScan = ConfiguredScan.radius(radius, centerX, centerZ);
-		return startTask(source, dimension, configuredScan);
+		hasConfiguredSelection = true;
+		return startTask(source, dimension, configuredScan, configuredRelightMode);
 	}
 
 	public int startRegion(CommandSourceStack source, String dimension, int x1, int z1, int x2, int z2) throws CommandSyntaxException {
 		configuredDimension = dimension;
 		configuredScan = ConfiguredScan.box(x1, z1, x2, z2);
-		return startTask(source, dimension, configuredScan);
+		hasConfiguredSelection = true;
+		return startTask(source, dimension, configuredScan, configuredRelightMode);
+	}
+
+	public int previewConfigured(CommandSourceStack source) throws CommandSyntaxException {
+		TaskSelection selection = defaultSelection(source);
+		return previewTask(source, selection.dimension(), selection.scan(), configuredRelightMode);
+	}
+
+	public int previewWorld(CommandSourceStack source, String dimension) throws CommandSyntaxException {
+		configuredDimension = dimension;
+		configuredScan = ConfiguredScan.world();
+		hasConfiguredSelection = true;
+		return previewTask(source, dimension, configuredScan, configuredRelightMode);
+	}
+
+	public int previewRadius(CommandSourceStack source, String dimension, int radius, int centerX, int centerZ) throws CommandSyntaxException {
+		configuredDimension = dimension;
+		configuredScan = ConfiguredScan.radius(radius, centerX, centerZ);
+		hasConfiguredSelection = true;
+		return previewTask(source, dimension, configuredScan, configuredRelightMode);
+	}
+
+	public int previewRegion(CommandSourceStack source, String dimension, int x1, int z1, int x2, int z2) throws CommandSyntaxException {
+		configuredDimension = dimension;
+		configuredScan = ConfiguredScan.box(x1, z1, x2, z2);
+		hasConfiguredSelection = true;
+		return previewTask(source, dimension, configuredScan, configuredRelightMode);
 	}
 
 	public int pause(CommandSourceStack source) throws CommandSyntaxException {
@@ -119,16 +156,8 @@ public final class LucTaskManager {
 		if (pendingAction == PendingAction.CANCEL) {
 			throw commandError("Cancellation is already draining in-flight chunks.");
 		}
-		if (!inFlightChunks.isEmpty()) {
-			pendingAction = PendingAction.PAUSE;
-			CommandFeedback.sendSuccess(
-				source,
-				"Pause requested. Waiting for " + inFlightChunks.size() + " in-flight chunk(s) to finish before saving luc_state.json.",
-				true
-			);
-			return 1;
-		}
 
+		int released = inFlightChunks.size();
 		requeueInFlightChunks(activeTask);
 		try {
 			ServerLevel level = findLevel(activeTask.getDimensionId());
@@ -140,7 +169,11 @@ public final class LucTaskManager {
 			throw commandError("Failed to save luc_state.json: " + exception.getMessage());
 		}
 
-		CommandFeedback.sendSuccess(source, "Paused relight task and wrote luc_state.json.", true);
+		CommandFeedback.sendSuccess(
+			source,
+			"Paused relight task and wrote luc_state.json." + (released > 0 ? " Released " + released + " in-flight chunk(s)." : ""),
+			true
+		);
 		progressBar.stop();
 		activeTask = null;
 		pendingAction = PendingAction.NONE;
@@ -169,7 +202,8 @@ public final class LucTaskManager {
 
 		CommandFeedback.sendSuccess(
 			source,
-			"Resumed " + activeTask.getMode().serializedName() + " task in " + activeTask.getDimensionId(),
+			"Resumed " + activeTask.getMode().serializedName() + " task in " + activeTask.getDimensionId() +
+				" with relight=" + activeTask.getRelightMode().serializedName(),
 			true
 		);
 		return 1;
@@ -177,20 +211,27 @@ public final class LucTaskManager {
 
 	public int cancel(CommandSourceStack source) {
 		if (activeTask != null) {
-			if (!inFlightChunks.isEmpty()) {
-				pendingAction = PendingAction.CANCEL;
-				CommandFeedback.sendSuccess(
-					source,
-					"Cancellation requested. Waiting for " + inFlightChunks.size() + " in-flight chunk(s) to finish.",
-					true
-				);
-				return 1;
-			}
+			int released = inFlightChunks.size();
 			requeueInFlightChunks(activeTask);
 			ServerLevel level = findLevel(activeTask.getDimensionId());
 			if (level != null) {
 				flushRelitChunks(level, clock.millis());
 			}
+			progressBar.stop();
+			activeTask = null;
+			pendingAction = PendingAction.NONE;
+			pendingChunkSaveFlush = false;
+			try {
+				Files.deleteIfExists(stateFile());
+			} catch (IOException exception) {
+				LightenUpChunks.LOGGER.warn("Failed to delete {}", stateFile(), exception);
+			}
+			CommandFeedback.sendSuccess(
+				source,
+				"Cancelled the active relight task." + (released > 0 ? " Released " + released + " in-flight chunk(s)." : ""),
+				true
+			);
+			return 1;
 		}
 		progressBar.stop();
 		activeTask = null;
@@ -211,9 +252,20 @@ public final class LucTaskManager {
 		return 1;
 	}
 
+	public int dimensions(CommandSourceStack source) {
+		CommandFeedback.sendSuccess(source, "LUC dimensions | " + String.join(", ", availableDimensions()), false);
+		return 1;
+	}
+
 	public int resetSelection(CommandSourceStack source) {
+		configuredDimension = LucDimensions.asString(source.getLevel());
 		configuredScan = ConfiguredScan.world();
-		CommandFeedback.sendSuccess(source, "Reset selection to the whole loaded world in " + configuredDimension + ".", false);
+		hasConfiguredSelection = false;
+		CommandFeedback.sendSuccess(
+			source,
+			"Reset selection. /luc start will scan the whole current world/dimension (" + configuredDimension + ") with relight=" + configuredRelightMode.serializedName() + ".",
+			false
+		);
 		return 1;
 	}
 
@@ -227,52 +279,84 @@ public final class LucTaskManager {
 		return 1;
 	}
 
+	public int relightMode(CommandSourceStack source) {
+		CommandFeedback.sendSuccess(source, "LUC relight mode | configured=" + configuredRelightMode.serializedName(), false);
+		return 1;
+	}
+
+	public int configureRelightMode(CommandSourceStack source, RelightMode relightMode) {
+		configuredRelightMode = relightMode;
+		CommandFeedback.sendSuccess(source, "Configured relight mode: " + relightMode.serializedName() + ".", false);
+		return 1;
+	}
+
 	public int configureWorld(CommandSourceStack source, String dimension) throws CommandSyntaxException {
 		requireLevel(dimension);
 		configuredDimension = dimension;
 		configuredScan = ConfiguredScan.world();
-		CommandFeedback.sendSuccess(source, "Configured world scan for " + dimension + ".", false);
+		hasConfiguredSelection = true;
+		CommandFeedback.sendSuccess(
+			source,
+			"Configured world scan for " + dimension + " with relight=" + configuredRelightMode.serializedName() + ".",
+			false
+		);
 		return 1;
 	}
 
 	public int configureRadius(CommandSourceStack source, int radius, int centerX, int centerZ) {
+		configuredDimension = LucDimensions.asString(source.getLevel());
 		configuredScan = ConfiguredScan.radius(radius, centerX, centerZ);
+		hasConfiguredSelection = true;
 		CommandFeedback.sendSuccess(
 			source,
-			"Configured radius scan: r=" + radius + " blocks at (" + centerX + ", " + centerZ + ").",
+			"Configured radius scan in " + configuredDimension + ": r=" + radius + " blocks at (" + centerX + ", " + centerZ + ") with relight=" + configuredRelightMode.serializedName() + ".",
 			false
 		);
 		return 1;
 	}
 
 	public int configureRegion(CommandSourceStack source, int x1, int z1, int x2, int z2) {
+		configuredDimension = LucDimensions.asString(source.getLevel());
 		configuredScan = ConfiguredScan.box(x1, z1, x2, z2);
+		hasConfiguredSelection = true;
 		CommandFeedback.sendSuccess(
 			source,
-			"Configured region scan from block (" + x1 + ", " + z1 + ") to (" + x2 + ", " + z2 + ").",
+			"Configured region scan in " + configuredDimension + " from block (" + x1 + ", " + z1 + ") to (" + x2 + ", " + z2 + ") with relight=" + configuredRelightMode.serializedName() + ".",
 			false
 		);
 		return 1;
 	}
 
-	private int startTask(CommandSourceStack source, String dimension, ConfiguredScan scan) throws CommandSyntaxException {
+	private TaskSelection defaultSelection(CommandSourceStack source) {
+		if (hasConfiguredSelection) {
+			return new TaskSelection(configuredDimension, configuredScan);
+		}
+
+		String currentDimension = LucDimensions.asString(source.getLevel());
+		configuredDimension = currentDimension;
+		configuredScan = ConfiguredScan.world();
+		return new TaskSelection(currentDimension, configuredScan);
+	}
+
+	private int previewTask(CommandSourceStack source, String dimension, ConfiguredScan scan, RelightMode relightMode) throws CommandSyntaxException {
+		try {
+			TaskPlan plan = planTask(dimension, scan, relightMode);
+			CommandFeedback.sendSuccess(source, plan.previewMessage(describeThroughputSettings()), false);
+			return 1;
+		} catch (CommandSyntaxException exception) {
+			throw exception;
+		} catch (IOException exception) {
+			throw commandError("Failed to scan region files: " + exception.getMessage());
+		}
+	}
+
+	private int startTask(CommandSourceStack source, String dimension, ConfiguredScan scan, RelightMode relightMode) throws CommandSyntaxException {
 		if (activeTask != null) {
 			throw commandError("A relight task is already running. Use /luc pause or /luc cancel first.");
 		}
 
 		try {
-			ServerLevel level = requireLevel(dimension);
-			ChunkRegionScanner scanner = switch (scan.kind()) {
-				case WORLD -> new WorldScanner();
-				case RADIUS -> new RadiusScanner(scan.a(), scan.b(), scan.c());
-				case BOX -> new BoxScanner(scan.a(), scan.b(), scan.c(), scan.d());
-			};
-
-			List<ChunkPos> chunks = scanner.scan(level);
-
-			if (chunks.isEmpty()) {
-				throw commandError("No existing chunks matched that request. Radius and region coordinates use block/world coordinates.");
-			}
+			TaskPlan plan = planTask(dimension, scan, relightMode);
 
 			try {
 				Files.deleteIfExists(stateFile());
@@ -280,28 +364,20 @@ public final class LucTaskManager {
 				LightenUpChunks.LOGGER.warn("Failed to clear stale state file {}", stateFile(), exception);
 			}
 
-			ArrayDeque<ChunkPos> queue = createTaskQueue(scan.kind(), chunks);
+			ArrayDeque<ChunkPos> queue = createTaskQueue(relightMode, plan.runnableChunks());
 			activeTask = new LightTask(
-				dimension,
+				plan.dimension(),
 				scan.kind().mode(),
-				shouldInspectMissingLightOnly(scan.kind()),
+				relightMode,
 				queue,
 				queue.size(),
-				0L,
 				clock.millis()
 			);
 			lastChunkSaveFlushAtMillis = clock.millis();
 			pendingChunkSaveFlush = false;
 			progressBar.start(server);
 			progressBar.update(activeTask, clock.millis(), inFlightChunks.size(), currentDisplayChunk());
-			CommandFeedback.sendSuccess(
-				source,
-				"Started " + scan.kind().mode().serializedName() + " relight task in " + dimension +
-					" for " + queue.size() + " relight step(s)" +
-					(twoPassRelight(scan.kind()) ? " across 2 lighting passes" : "") +
-					" with up to " + MAX_IN_FLIGHT + " chunks in flight.",
-				true
-			);
+			CommandFeedback.sendSuccess(source, plan.startMessage(describeThroughputSettings()), true);
 			return 1;
 		} catch (CommandSyntaxException exception) {
 			throw exception;
@@ -326,16 +402,24 @@ public final class LucTaskManager {
 		}
 
 		try {
-			if (pendingAction == PendingAction.NONE) {
-				worker.submitChunks(level, activeTask, inFlightChunks, currentMaxInFlight());
-			}
-			int processed = worker.processLoadedChunks(level, inFlightChunks);
 			long nowMillis = clock.millis();
-			activeTask.recordProcessed(processed, nowMillis);
-			if (processed > 0) {
+			if (pendingAction == PendingAction.NONE) {
+				int skippedOnSubmit = worker.submitChunks(level, activeTask, inFlightChunks, currentMaxInFlight());
+				if (skippedOnSubmit > 0) {
+					activeTask.recordSkipped(skippedOnSubmit, nowMillis);
+				}
+			}
+			ChunkLightWorker.ProcessResult processed = worker.processLoadedChunks(level, inFlightChunks);
+			nowMillis = clock.millis();
+			activeTask.recordRelit(processed.relit(), nowMillis);
+			activeTask.recordSkipped(processed.skipped(), nowMillis);
+			for (ChunkLightWorker.FailureRecord failure : processed.failures()) {
+				activeTask.recordFailure(failure.chunkPos(), failure.message(), nowMillis);
+			}
+			if (processed.relit() > 0) {
 				pendingChunkSaveFlush = true;
 			}
-			if (pendingChunkSaveFlush && nowMillis - lastChunkSaveFlushAtMillis >= SAVE_FLUSH_INTERVAL_MILLIS) {
+			if (pendingChunkSaveFlush && nowMillis - lastChunkSaveFlushAtMillis >= saveFlushIntervalMillis()) {
 				flushRelitChunks(level, nowMillis);
 			}
 			progressBar.update(activeTask, nowMillis, inFlightChunks.size(), currentDisplayChunk());
@@ -360,6 +444,7 @@ public final class LucTaskManager {
 			if (pendingAction == PendingAction.NONE && activeTask.isComplete() && inFlightChunks.isEmpty()) {
 				LightenUpChunks.LOGGER.info("Completed relight task in {}", activeTask.getDimensionId());
 				flushRelitChunks(level, nowMillis);
+				broadcastCompletion(activeTask, nowMillis);
 				progressBar.stop();
 				activeTask = null;
 				pendingAction = PendingAction.NONE;
@@ -431,35 +516,56 @@ public final class LucTaskManager {
 			double rate = activeTask.getRecentChunksPerSecond(now);
 			long remaining = activeTask.getRemainingChunks() + inFlightChunks.size();
 			String eta = rate > 0.0D ? formatDuration(Duration.ofSeconds((long) Math.ceil(remaining / rate))) : "calculating";
-			return "LUC " + pendingAction.label() + " | dim=" + activeTask.getDimensionId() +
-				" | mode=" + activeTask.getMode().serializedName() +
-				" | relight=" + describeRelightMode(activeTask.getMode(), activeTask.inspectMissingLightOnly()) +
-				" | progress=" + activeTask.getProcessedChunks() + "/" + activeTask.getTotalChunks() +
-				" (" + percentage(activeTask.getProcessedChunks(), activeTask.getTotalChunks()) + ")" +
-				" | in_flight=" + inFlightChunks.size() +
-				" | rate=" + RATE_FORMAT.format(rate) + " chunks/s" +
-				" | eta=" + eta;
+			StringBuilder builder = new StringBuilder("LUC ")
+				.append(pendingAction.label())
+				.append(" | dim=").append(activeTask.getDimensionId())
+				.append(" | mode=").append(activeTask.getMode().serializedName())
+				.append(" | relight=").append(activeTask.getRelightMode().serializedName())
+				.append(" | progress=").append(activeTask.getProcessedChunks()).append("/").append(activeTask.getTotalChunks())
+				.append(" (").append(percentage(activeTask.getProcessedChunks(), activeTask.getTotalChunks())).append(")")
+				.append(" | relit=").append(activeTask.getRelitChunks())
+				.append(" | skipped=").append(activeTask.getSkippedChunks())
+				.append(" | failed=").append(activeTask.getFailedChunks())
+				.append(" | in_flight=").append(inFlightChunks.size())
+				.append(" | rate=").append(RATE_FORMAT.format(rate)).append(" chunks/s")
+				.append(" | eta=").append(eta);
+			appendLastFailure(builder, activeTask.getLastFailedChunk(), activeTask.getLastFailureMessage());
+			return builder.toString();
 		}
 
 		if (Files.exists(stateFile())) {
 			try {
 				SavedTaskState saved = readSavedState();
-				return "LUC paused | dim=" + saved.dimension +
-					" | mode=" + saved.mode +
-					" | relight=" + describeRelightMode(TaskMode.fromSerializedName(saved.mode), saved.inspect_missing_light_only == null || saved.inspect_missing_light_only) +
-					" | progress=" + saved.processed + "/" + saved.total +
-					" | remaining=" + saved.remaining_chunks.size();
+				RelightMode relightMode = savedRelightMode(saved);
+				long relit = firstNonNull(saved.relit, saved.processed, 0L);
+				long skipped = firstNonNull(saved.skipped, 0L);
+				long failed = firstNonNull(saved.failed, 0L);
+				StringBuilder builder = new StringBuilder("LUC paused | dim=")
+					.append(saved.dimension)
+					.append(" | mode=").append(saved.mode)
+					.append(" | relight=").append(relightMode.serializedName())
+					.append(" | progress=").append(relit + skipped + failed).append("/").append(saved.total)
+					.append(" | relit=").append(relit)
+					.append(" | skipped=").append(skipped)
+					.append(" | failed=").append(failed)
+					.append(" | remaining=").append(saved.remaining_chunks.size());
+				appendLastFailure(builder, chunkPos(saved.last_failed_chunk), saved.last_failure_message);
+				return builder.toString();
 			} catch (IOException | IllegalArgumentException exception) {
 				return "LUC paused | luc_state.json exists but could not be read: " + exception.getMessage();
 			}
 		}
 
 		return "LUC idle | configured dim=" + configuredDimension +
-			" | mode=" + configuredScan.describe();
+			" | mode=" + configuredScan.describe() +
+			" | relight=" + configuredRelightMode.serializedName();
 	}
 
 	private String describeSelection() {
-		return "LUC selection | dim=" + configuredDimension + " | mode=" + configuredScan.describe();
+		return "LUC selection" + (hasConfiguredSelection ? "" : " (default: /luc start scans the whole current world)") +
+			" | dim=" + configuredDimension +
+			" | mode=" + configuredScan.describe() +
+			" | relight=" + configuredRelightMode.serializedName();
 	}
 
 	public boolean hasActiveTask() {
@@ -470,9 +576,18 @@ public final class LucTaskManager {
 		SavedTaskState state = new SavedTaskState();
 		state.dimension = task.getDimensionId();
 		state.mode = task.getMode().serializedName();
+		state.relight_mode = task.getRelightMode().serializedName();
 		state.inspect_missing_light_only = task.inspectMissingLightOnly();
+		state.relit = task.getRelitChunks();
+		state.skipped = task.getSkippedChunks();
+		state.failed = task.getFailedChunks();
 		state.processed = task.getProcessedChunks();
 		state.total = task.getTotalChunks();
+		state.started_at_millis = task.getStartedAtMillis();
+		state.last_progress_at_millis = task.getLastProgressAtMillis();
+		state.recent_chunks_per_second = task.getRecentChunksPerSecond(clock.millis());
+		state.last_failed_chunk = chunkArray(task.getLastFailedChunk());
+		state.last_failure_message = task.getLastFailureMessage();
 		state.remaining_chunks = task.snapshotRemainingChunks();
 
 		Path stateFile = stateFile();
@@ -493,17 +608,20 @@ public final class LucTaskManager {
 				queue.addLast(new ChunkPos(entry[0], entry[1]));
 			}
 		}
-		boolean inspectMissingLightOnly = state.inspect_missing_light_only != null
-			? state.inspect_missing_light_only
-			: TaskMode.fromSerializedName(state.mode) == TaskMode.WORLD && LucConfigManager.get().calculateOnlyEmptyLightChunks;
 		return new LightTask(
 			dimension,
 			TaskMode.fromSerializedName(state.mode),
-			inspectMissingLightOnly,
+			savedRelightMode(state),
 			queue,
 			state.total,
-			state.processed,
-			clock.millis()
+			firstNonNull(state.relit, state.processed, 0L),
+			firstNonNull(state.skipped, 0L),
+			firstNonNull(state.failed, 0L),
+			firstNonNull(state.started_at_millis, clock.millis()),
+			firstNonNull(state.last_progress_at_millis, clock.millis()),
+			state.recent_chunks_per_second != null ? state.recent_chunks_per_second : 0.0D,
+			chunkPos(state.last_failed_chunk),
+			state.last_failure_message
 		);
 	}
 
@@ -579,12 +697,17 @@ public final class LucTaskManager {
 			return;
 		}
 
-		level.getChunkSource().save(false);
+		// Relit chunks are saved explicitly as they complete. Avoid a broad world save
+		// here so we never persist unrelated chunks that may have been loaded transiently.
 		lastChunkSaveFlushAtMillis = nowMillis;
 		pendingChunkSaveFlush = false;
 	}
 
 	private int currentMaxInFlight() {
+		int configured = LucConfigManager.get().maxInFlightChunks;
+		if (configured > 0) {
+			return configured;
+		}
 		double averageMspt = server.getAverageTickTimeNanos() / 1_000_000.0D;
 		if (averageMspt >= 45.0D) {
 			return 16;
@@ -604,38 +727,205 @@ public final class LucTaskManager {
 		return MAX_IN_FLIGHT;
 	}
 
-	private boolean shouldInspectMissingLightOnly(ScanKind scanKind) {
-		return scanKind == ScanKind.WORLD && LucConfigManager.get().calculateOnlyEmptyLightChunks;
-	}
-
-	private ArrayDeque<ChunkPos> createTaskQueue(ScanKind scanKind, List<ChunkPos> chunks) {
+	private ArrayDeque<ChunkPos> createTaskQueue(RelightMode relightMode, List<ChunkPos> chunks) {
 		ArrayDeque<ChunkPos> queue = new ArrayDeque<>(chunks);
-		if (twoPassRelight(scanKind)) {
+		if (relightMode.requiresTwoPasses()) {
 			queue.addAll(chunks);
 		}
 		return queue;
 	}
 
-	private boolean twoPassRelight(ScanKind scanKind) {
-		return scanKind == ScanKind.RADIUS || scanKind == ScanKind.BOX;
+	private TaskPlan planTask(String dimension, ConfiguredScan scan, RelightMode relightMode) throws CommandSyntaxException, IOException {
+		ServerLevel level = requireLevel(dimension);
+		ChunkRegionScanner scanner = switch (scan.kind()) {
+			case WORLD -> new WorldScanner();
+			case RADIUS -> new RadiusScanner(scan.a(), scan.b(), scan.c());
+			case BOX -> new BoxScanner(scan.a(), scan.b(), scan.c(), scan.d());
+		};
+
+		List<ChunkPos> matchedChunks = scanner.scan(level);
+		if (matchedChunks.isEmpty()) {
+			throw commandError("No existing chunks found in " + WorldPathResolver.resolveDimensionRoot(level).resolve("region") + ".");
+		}
+
+		RegionFileProbe regionFileProbe = new RegionFileProbe();
+		List<ChunkPos> runnableChunks = new ArrayList<>(matchedChunks.size());
+		int boundarySkipped = 0;
+		for (ChunkPos chunkPos : matchedChunks) {
+			if (allChunksExist(level, regionFileProbe, ticketArea(chunkPos))) {
+				runnableChunks.add(chunkPos);
+			} else {
+				boundarySkipped++;
+			}
+		}
+		if (runnableChunks.isEmpty()) {
+			throw commandError("All matched chunks were skipped because at least one chunk in their required neighboring load area is missing on disk.");
+		}
+
+		return new TaskPlan(dimension, scan, relightMode, matchedChunks.size(), List.copyOf(runnableChunks), boundarySkipped);
 	}
 
-	private String describeRelightMode(TaskMode mode, boolean inspectMissingLightOnly) {
-		if (inspectMissingLightOnly) {
-			return "missing-light-only";
+	private List<String> availableDimensions() {
+		Set<String> dimensions = new LinkedHashSet<>();
+		dimensions.add(LucDimensions.OVERWORLD);
+		dimensions.add(LucDimensions.NETHER);
+		dimensions.add(LucDimensions.END);
+		for (ServerLevel level : ServerLevels.all(server)) {
+			dimensions.add(LucDimensions.asString(level));
 		}
-		if (mode == TaskMode.RADIUS || mode == TaskMode.BOX) {
-			return "full-2-pass";
+		return List.copyOf(dimensions);
+	}
+
+	private String describeThroughputSettings() {
+		LucConfig config = LucConfigManager.get();
+		return "throughput maxInFlight=" + describeOverride(config.maxInFlightChunks, currentMaxInFlight()) +
+			", relightsPerTick=" + describeOverride(config.maxRelightsPerTick, workerMaxRelightsPerTick()) +
+			", saveFlush=" + config.saveFlushIntervalSeconds + "s";
+	}
+
+	private int workerMaxRelightsPerTick() {
+		int configured = LucConfigManager.get().maxRelightsPerTick;
+		if (configured > 0) {
+			return configured;
 		}
-		return "full";
+		double averageMspt = server.getAverageTickTimeNanos() / 1_000_000.0D;
+		if (averageMspt >= 45.0D) {
+			return 4;
+		}
+		if (averageMspt >= 35.0D) {
+			return 8;
+		}
+		if (averageMspt >= 25.0D) {
+			return 16;
+		}
+		if (averageMspt >= 18.0D) {
+			return 32;
+		}
+		if (averageMspt >= 14.0D) {
+			return 48;
+		}
+		return 72;
+	}
+
+	private long saveFlushIntervalMillis() {
+		return LucConfigManager.get().saveFlushIntervalSeconds * 1000L;
+	}
+
+	private void broadcastCompletion(LightTask task, long nowMillis) {
+		long elapsedSeconds = task.getElapsedSeconds(nowMillis);
+		double averageRate = task.getRelitChunks() / (double) elapsedSeconds;
+		StringBuilder builder = new StringBuilder("Lit up ")
+			.append(formatCount(task.getRelitChunks()))
+			.append(" chunks in ")
+			.append(formatDuration(Duration.ofSeconds(elapsedSeconds)))
+			.append(", averaging around ")
+			.append(RATE_FORMAT.format(averageRate))
+			.append(" chunks/s");
+		if (task.getSkippedChunks() > 0L || task.getFailedChunks() > 0L) {
+			builder.append(" | skipped ").append(formatCount(task.getSkippedChunks()))
+				.append(" | failed ").append(formatCount(task.getFailedChunks()));
+		}
+		Component message = TextComponents.literal(builder.toString());
+		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+			player.sendSystemMessage(message);
+		}
+	}
+
+	private static String formatCount(long value) {
+		return String.format(Locale.ROOT, "%,d", value);
+	}
+
+	private static String describeOverride(int configured, int effective) {
+		return configured > 0 ? String.valueOf(configured) : "adaptive(" + effective + ")";
+	}
+
+	private static void appendLastFailure(StringBuilder builder, ChunkPos chunkPos, String failureMessage) {
+		if (chunkPos == null || failureMessage == null || failureMessage.isBlank()) {
+			return;
+		}
+		builder.append(" | last_failed=").append(chunkPos.x()).append(",").append(chunkPos.z()).append(" (").append(failureMessage).append(")");
+	}
+
+	private static int[] chunkArray(ChunkPos chunkPos) {
+		if (chunkPos == null) {
+			return null;
+		}
+		return new int[] {chunkPos.x(), chunkPos.z()};
+	}
+
+	private static ChunkPos chunkPos(int[] value) {
+		if (value == null || value.length < 2) {
+			return null;
+		}
+		return new ChunkPos(value[0], value[1]);
+	}
+
+	private static RelightMode savedRelightMode(SavedTaskState state) {
+		if (state.relight_mode != null) {
+			return RelightMode.fromSerializedName(state.relight_mode);
+		}
+		if (Boolean.TRUE.equals(state.inspect_missing_light_only)) {
+			return RelightMode.MISSING_ONLY;
+		}
+		return TaskMode.fromSerializedName(state.mode) == TaskMode.WORLD ? RelightMode.FULL : RelightMode.FULL_2_PASS;
+	}
+
+	private static long firstNonNull(Long primary, long fallback) {
+		return primary != null ? primary : fallback;
+	}
+
+	private static long firstNonNull(Long primary, Long secondary, long fallback) {
+		if (primary != null) {
+			return primary;
+		}
+		if (secondary != null) {
+			return secondary;
+		}
+		return fallback;
+	}
+
+	private boolean allChunksExist(ServerLevel level, RegionFileProbe regionFileProbe, List<ChunkPos> chunkPositions) throws IOException {
+		for (ChunkPos chunkPos : chunkPositions) {
+			if (!regionFileProbe.chunkExists(level, chunkPos)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static List<ChunkPos> ticketArea(ChunkPos centerChunkPos) {
+		return chunkArea(centerChunkPos, 1);
+	}
+
+	private static List<ChunkPos> chunkArea(ChunkPos centerChunkPos, int radius) {
+		List<ChunkPos> retainedChunks = new ArrayList<>((radius * 2 + 1) * (radius * 2 + 1));
+		for (int dx = -radius; dx <= radius; dx++) {
+			for (int dz = -radius; dz <= radius; dz++) {
+				retainedChunks.add(new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz));
+			}
+		}
+		return retainedChunks;
+	}
+
+	private static RelightMode configuredDefaultRelightMode() {
+		return RelightMode.fromSerializedName(LucConfigManager.get().defaultRelightMode);
 	}
 
 	private static final class SavedTaskState {
 		String dimension;
 		String mode;
+		String relight_mode;
 		Boolean inspect_missing_light_only;
-		long processed;
+		Long relit;
+		Long skipped;
+		Long failed;
+		Long processed;
 		long total;
+		Long started_at_millis;
+		Long last_progress_at_millis;
+		Double recent_chunks_per_second;
+		int[] last_failed_chunk;
+		String last_failure_message;
 		List<int[]> remaining_chunks;
 	}
 
@@ -671,10 +961,38 @@ public final class LucTaskManager {
 		String describe() {
 			return switch (kind) {
 				case WORLD -> "world";
-				case RADIUS -> "radius(r=" + a + " blocks, x=" + b + ", z=" + c + ")";
+				case RADIUS -> "radius(circle r=" + a + " blocks, x=" + b + ", z=" + c + ")";
 				case BOX -> "region(blocks " + a + ", " + b + " -> " + c + ", " + d + ")";
 			};
 		}
+	}
+
+	private record TaskPlan(String dimension, ConfiguredScan scan, RelightMode relightMode, int matchedChunks, List<ChunkPos> runnableChunks, int boundarySkipped) {
+		private int steps() {
+			return relightMode.requiresTwoPasses() ? runnableChunks.size() * 2 : runnableChunks.size();
+		}
+
+		String previewMessage(String throughputDescription) {
+			return "LUC preview | dim=" + dimension +
+				" | mode=" + scan.describe() +
+				" | relight=" + relightMode.serializedName() +
+				" | matched=" + matchedChunks +
+				" | runnable=" + runnableChunks.size() +
+				" | boundary_skips=" + boundarySkipped +
+				" | relight_steps=" + steps() +
+				" | " + throughputDescription;
+		}
+
+		String startMessage(String throughputDescription) {
+			return "Started " + scan.kind().mode().serializedName() + " relight task in " + dimension +
+				" with relight=" + relightMode.serializedName() +
+				" for " + runnableChunks.size() + " chunk(s), " + steps() + " relight step(s)" +
+				(boundarySkipped > 0 ? ", skipping " + boundarySkipped + " chunk(s) with missing neighbors" : "") +
+				" | " + throughputDescription;
+		}
+	}
+
+	private record TaskSelection(String dimension, ConfiguredScan scan) {
 	}
 
 	private enum ScanKind {
