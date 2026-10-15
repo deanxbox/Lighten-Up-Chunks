@@ -130,16 +130,12 @@ public final class ChunkLightWorker {
 						finished = true;
 						continue;
 					}
-<<<<<<< HEAD
-					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
-=======
 					if (anyReplaced(level, inFlightChunk.retainedChunks())) {
 						skipped++;
 						finished = true;
 						continue;
 					}
 					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
->>>>>>> 0776763 (Wire deferred claim release, reject replaced chunks before relight, stricter block_states check)
 
 					inFlightChunk.startRelight(relightChunk(level, levelChunk));
 					startedThisTick++;
