@@ -158,6 +158,7 @@ public final class ChunkLightWorker {
 				if (relitChunk instanceof LevelChunk levelChunk) {
 					levelChunk.markUnsaved();
 				}
+				failedCentres.remove(chunkPos); // this attempt succeeded; light is valid again
 				markDirty(level, inFlightChunk.retainedChunks(), chunkPos);
 				relit++;
 				finished = true;
@@ -206,6 +207,8 @@ public final class ChunkLightWorker {
 	}
 
 	private final Map<ChunkPos, SuppressedListener> suppressedListeners = new HashMap<>();
+	private final Map<ChunkPos, Integer> mutedAttempts = new HashMap<>();
+	private final Set<ChunkPos> startedCentres = new HashSet<>();
 	private final Map<ChunkPos, CompletableFuture<ChunkAccess>> relightRaw = new ConcurrentHashMap<>();
 	private final Set<ChunkPos> failedCentres = new HashSet<>(); // relights that failed: their in-memory light is unreliable, never saved by us
 
@@ -217,12 +220,28 @@ public final class ChunkLightWorker {
 	}
 
 	private void releaseChunk(ServerLevel level, ChunkPos chunkPos, InFlightChunk inFlightChunk) {
-		SuppressedListener suppressed = suppressedListeners.remove(chunkPos);
+		boolean started = startedCentres.remove(chunkPos);
 		CompletableFuture<ChunkAccess> raw = relightRaw.remove(chunkPos);
+		boolean unsettled = raw != null && !raw.isDone();
 		inFlightChunk.cancelPendingWork();
 		Runnable tail = () -> {
-			if (suppressed != null) {
-				restoreListener(suppressed);
+			if (started) {
+				// A failed or interrupted relight leaves partial light in memory: flag it as not-correct so that whatever persists it
+				// (vanilla autosave/unload) records "light not valid" and vanilla relights it on next load, rather than trusting it.
+				if (unsettled || failedCentres.contains(chunkPos) || (raw != null && raw.isCompletedExceptionally())) {
+					failedCentres.add(chunkPos);
+					SuppressedListener s = suppressedListeners.get(chunkPos);
+					if (s != null) {
+						s.chunk().setLightCorrect(false);
+					}
+				}
+				if (mutedAttempts.merge(chunkPos, -1, Integer::sum) <= 0) {
+					mutedAttempts.remove(chunkPos);
+					SuppressedListener s = suppressedListeners.remove(chunkPos);
+					if (s != null) {
+						restoreListener(s);
+					}
+				}
 			}
 			if (inFlightChunk.loadStarted()) {
 				releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
@@ -235,7 +254,7 @@ public final class ChunkLightWorker {
 			List<ChunkPos> claimed = chunkArea(chunkPos, PREFLIGHT_RADIUS);
 			inFlightChunk.settledFuture.whenComplete((ignored, error) -> LucNoGeneration.release(chunkMap, claimed));
 		}
-		if (raw != null && !raw.isDone()) {
+		if (unsettled) {
 			// Interrupted mid-relight: the light engine keeps running. Hold the tickets (so the chunk stays loaded), the light data and the
 			// muted listener until it settles, then release on the server thread. The unsaved flag is never touched, so real edits are kept.
 			raw.handle((ignored, error) -> null).thenRun(() -> level.getServer().execute(tail));
@@ -248,9 +267,15 @@ public final class ChunkLightWorker {
 		ThreadedLevelLightEngine lightEngine = chunkSource.getLightEngine();
 		// Starlight finishes lighting on a worker thread and calls markUnsaved(); if the chunk was saved meanwhile that fires the
 		// unsaved listener off-thread (C2ME throws "Async chunk modification"). Mute it for the relight; restored on the server thread.
-		failedCentres.remove(chunk.getPos());
-		suppressedListeners.put(chunk.getPos(), new SuppressedListener(chunk, ((LevelChunkAccessor) chunk).lightenupchunks$getUnsavedListener()));
-		chunk.setUnsavedListener(pos -> { });
+		// Overlapping attempts on one chunk (a paused task resumed while the old relight still runs) share one muted listener:
+		// the original is captured once and restored only when the last attempt has settled.
+		SuppressedListener existing = suppressedListeners.get(chunk.getPos());
+		if (existing == null) {
+			suppressedListeners.put(chunk.getPos(), new SuppressedListener(chunk, ((LevelChunkAccessor) chunk).lightenupchunks$getUnsavedListener()));
+			chunk.setUnsavedListener(pos -> { });
+		}
+		mutedAttempts.merge(chunk.getPos(), 1, Integer::sum);
+		startedCentres.add(chunk.getPos());
 		ImposterProtoChunk protoChunk = new ImposterProtoChunk(chunk, true);
 		ChunkPos chunkPos = protoChunk.getPos();
 
@@ -316,7 +341,6 @@ public final class ChunkLightWorker {
 	public void clearDirty() {
 		dirtyChunks.clear();
 		relitCentres.clear();
-		failedCentres.clear();
 	}
 
 	/** force: pause/cancel/shutdown. Saves everything stable and drops (without saving) chunks next to a half-finished relight. */
