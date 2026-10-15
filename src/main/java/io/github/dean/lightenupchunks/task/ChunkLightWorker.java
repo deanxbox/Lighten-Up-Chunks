@@ -209,43 +209,46 @@ public final class ChunkLightWorker {
 	private final Map<ChunkPos, CompletableFuture<ChunkAccess>> relightRaw = new ConcurrentHashMap<>();
 	private final Set<ChunkPos> failedCentres = new HashSet<>(); // relights that failed: their in-memory light is unreliable, never saved by us
 
-	private void finishRelight(SuppressedListener suppressed, boolean lightValid) {
+	// Server thread only: restoring re-fires the listener if the chunk is unsaved, and C2ME rejects that off-thread.
+	private static void restoreListener(SuppressedListener suppressed) {
 		if (suppressed.listener() != null) {
 			suppressed.chunk().setUnsavedListener(suppressed.listener());
-		}
-		if (!lightValid) {
-			((ChunkAccessAccessor) suppressed.chunk()).lightenupchunks$setUnsaved(false);
 		}
 	}
 
 	private void releaseChunk(ServerLevel level, ChunkPos chunkPos, InFlightChunk inFlightChunk) {
 		SuppressedListener suppressed = suppressedListeners.remove(chunkPos);
 		CompletableFuture<ChunkAccess> raw = relightRaw.remove(chunkPos);
-		if (suppressed != null) {
-			if (raw == null || raw.isDone()) {
-				finishRelight(suppressed, raw != null && !raw.isCompletedExceptionally() && !failedCentres.contains(chunkPos));
-			} else {
-				// Interrupted mid-relight: the light engine keeps running and its light is cleared/partial. Wait for it to settle, then make
-				// sure vanilla will not autosave the half-relit chunk over the intact disk data.
-				raw.whenComplete((ignored, error) -> finishRelight(suppressed, false));
-			}
-		}
 		inFlightChunk.cancelPendingWork();
+		Runnable tail = () -> {
+			if (suppressed != null) {
+				restoreListener(suppressed);
+			}
+			if (inFlightChunk.loadStarted()) {
+				releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
+				releaseLightData(level, inFlightChunk.retainedChunks());
+			}
+		};
 		if (inFlightChunk.loadStarted()) {
 			// Keep the no-generation veto until vanilla load work has settled (cancelling our wrapper does not stop it).
 			ChunkMap chunkMap = level.getChunkSource().chunkMap;
 			List<ChunkPos> claimed = chunkArea(chunkPos, PREFLIGHT_RADIUS);
 			inFlightChunk.settledFuture.whenComplete((ignored, error) -> LucNoGeneration.release(chunkMap, claimed));
-			releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
-			releaseLightData(level, inFlightChunk.retainedChunks());
+		}
+		if (raw != null && !raw.isDone()) {
+			// Interrupted mid-relight: the light engine keeps running. Hold the tickets (so the chunk stays loaded), the light data and the
+			// muted listener until it settles, then release on the server thread. The unsaved flag is never touched, so real edits are kept.
+			raw.handle((ignored, error) -> null).thenRun(() -> level.getServer().execute(tail));
+		} else {
+			tail.run();
 		}
 	}
-
 	private CompletableFuture<ChunkAccess> relightChunk(ServerLevel level, LevelChunk chunk) {
 		ServerChunkCache chunkSource = level.getChunkSource();
 		ThreadedLevelLightEngine lightEngine = chunkSource.getLightEngine();
 		// Starlight finishes lighting on a worker thread and calls markUnsaved(); if the chunk was saved meanwhile that fires the
 		// unsaved listener off-thread (C2ME throws "Async chunk modification"). Mute it for the relight; restored on the server thread.
+		failedCentres.remove(chunk.getPos());
 		suppressedListeners.put(chunk.getPos(), new SuppressedListener(chunk, ((LevelChunkAccessor) chunk).lightenupchunks$getUnsavedListener()));
 		chunk.setUnsavedListener(pos -> { });
 		ImposterProtoChunk protoChunk = new ImposterProtoChunk(chunk, true);
@@ -332,7 +335,7 @@ public final class ChunkLightWorker {
 				n -> inFlightChunks.containsKey(n),
 				n -> {
 					InFlightChunk c = inFlightChunks.get(n);
-					return c != null && c.hasRelightFuture() && !c.relightFuture().isDone();
+					return c != null && c.hasRelightFuture() && (!c.relightFuture().isDone() || c.relightFuture().isCompletedExceptionally());
 				},
 				force
 			);
