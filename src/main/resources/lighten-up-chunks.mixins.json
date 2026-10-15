@@ -4,7 +4,9 @@
 	"compatibilityLevel": "JAVA_25",
 	"mixins": [
 		"accessor.ChunkAccessAccessor",
-		"accessor.ChunkMapInvoker"
+		"accessor.ChunkMapInvoker",
+		"ChunkGenerationTaskMixin",
+		"ChunkMapMixin"
 	],
 	"client": [
 		"client.MinecraftPauseMixin"
@@ -13,3 +15,5 @@
 		"defaultRequire": 1
 	}
 }
+
+
