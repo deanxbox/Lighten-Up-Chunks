@@ -4,9 +4,13 @@ Each version section is published as the Modrinth changelog for its tag.
 
 ## 1.3.0
 
-- Chunky-style selection workflow: world, shape, center, radius, corners.
-- Only chunks already present in region files are relit; missing chunks are never generated or written.
-- Chunks are verified as saved "minecraft:full" (read-only, off-thread) over the full 5x5 dependency area before any chunk ticket is added; areas that fail the check are skipped.
-- Hard no-generation guard: a mixin cancels any chunk generation (and flags replacement of unreadable chunks) inside areas being relit, and such areas are skipped without saving.
-- Read-only region reads (no RegionFile handle opened for writing); duplicate saves/Voxy notifications for overlapping areas are removed.
-- Voxy / VoxyServer notified after relighting.
+- Minecraft version: 1.21.11.
+- Select relight areas with Chunky-style shapes, centers, radii, or corners using /luc; the default scan now covers the whole world.
+- Relighting never generates chunks: it preflights saved FULL chunks, blocks generation while relighting, and skips chunks replaced during the operation.
+- Edge chunks can now be relit; chunks with missing neighbours are skipped.
+- Region data is read without opening region files for writing.
+- Saves and Voxy notifications are coalesced once per chunk, with same-tick worker refill and per-dimension workers; a 500-block test ran about 20-30% faster.
+- Failed or interrupted relights are handled safely and are not treated as successfully saved.
+- Fix a C2ME/Starlight compatibility issue that could leave dark patches.
+- Log a [LUC timings] line with per-stage relight timings.
+- Notify Voxy and VoxyServer after relighting.
