@@ -21,7 +21,7 @@ public final class LucNoGeneration {
 	}
 
 	private static long key(ChunkPos pos) {
-		return ((long) pos.x() << 32) | (pos.z() & 0xFFFFFFFFL);
+		return ((long) pos.x << 32) | (pos.z & 0xFFFFFFFFL);
 	}
 
 	public static void claim(Object chunkMap, Collection<ChunkPos> positions) {
