@@ -379,7 +379,8 @@ public final class LucTaskManager {
 				Files.deleteIfExists(stateFile());
 				return;
 			}
-			if (pendingAction == PendingAction.NONE && activeTask.isComplete() && inFlightChunks.isEmpty()) {
+			// hasDirty: saves still waiting on a neighbour (or a detached relight) must drain before the task may finish.
+			if (pendingAction == PendingAction.NONE && activeTask.isComplete() && inFlightChunks.isEmpty() && !worker.hasDirty()) {
 				LightenUpChunks.LOGGER.info("Completed relight task in {}", activeTask.getDimensionId());
 			LightenUpChunks.LOGGER.info("[LUC timings] {}", LucTimings.summary());
 				flushRelitChunks(level, nowMillis);
