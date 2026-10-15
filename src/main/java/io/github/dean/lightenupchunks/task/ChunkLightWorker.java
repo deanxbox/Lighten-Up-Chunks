@@ -200,8 +200,7 @@ public final class ChunkLightWorker {
 			// Keep the no-generation veto until vanilla load work has settled (cancelling our wrapper does not stop it).
 			ChunkMap chunkMap = level.getChunkSource().chunkMap;
 			List<ChunkPos> claimed = chunkArea(chunkPos, PREFLIGHT_RADIUS);
-			inFlightChunk.settledFuture.orTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
-				.whenComplete((ignored, error) -> LucNoGeneration.release(chunkMap, claimed));
+			inFlightChunk.settledFuture.whenComplete((ignored, error) -> LucNoGeneration.release(chunkMap, claimed));
 			releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
 			releaseLightData(level, inFlightChunk.retainedChunks());
 		}
