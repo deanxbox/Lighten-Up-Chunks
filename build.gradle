@@ -1,5 +1,6 @@
 plugins {
 	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'com.modrinth.minotaur' version '2.10.0'
 	id 'maven-publish'
 }
 
@@ -66,5 +67,28 @@ publishing {
 		}
 	}
 	repositories {
+	}
+}
+
+// Publish with: MODRINTH_KEY=... ./gradlew modrinth (CI does this on v* tags).
+modrinth {
+	token = System.getenv("MODRINTH_KEY")
+	projectId = "lighten-up-chunks"
+	versionNumber = "${project.mod_version}+${project.minecraft_version}"
+	versionName = "Lighten Up, Chunks! ${project.mod_version} for Minecraft ${project.minecraft_version}"
+	versionType = "release"
+	uploadFile = tasks.named("jar")
+	gameVersions = project.modrinth_game_versions.split(",").collect { it.trim() }
+	loaders = ["fabric"]
+	// Uses this branch's CHANGELOG.md section titled "## <mod_version>".
+	changelog = providers.provider {
+		def text = file("CHANGELOG.md").text
+		def matcher = text =~ /(?ms)^## \[?${java.util.regex.Pattern.quote(project.mod_version)}\]?[^\r\n]*\R(.*?)(?=^## |\z)/
+		if (!matcher.find()) throw new GradleException("CHANGELOG.md has no '## ${project.mod_version}' section")
+		matcher.group(1).trim()
+	}
+	dependencies {
+		required.project "fabric-api"
+		optional.project "modmenu"
 	}
 }
