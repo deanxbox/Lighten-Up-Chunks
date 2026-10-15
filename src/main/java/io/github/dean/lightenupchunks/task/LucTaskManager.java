@@ -56,7 +56,7 @@ public final class LucTaskManager {
 	private long lastChunkSaveFlushAtMillis;
 	private boolean pendingChunkSaveFlush;
 	private String configuredDimension = LucDimensions.OVERWORLD;
-	private ConfiguredScan configuredScan = ConfiguredScan.square(0, 0, 500, 500);
+	private ConfiguredScan configuredScan = ConfiguredScan.world();
 	private RelightMode configuredRelightMode = configuredDefaultRelightMode();
 
 	private LucTaskManager(MinecraftServer server) {
