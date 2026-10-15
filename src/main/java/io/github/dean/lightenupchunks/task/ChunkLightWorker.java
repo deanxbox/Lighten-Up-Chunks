@@ -208,6 +208,8 @@ public final class ChunkLightWorker {
 
 	private final Map<ChunkPos, SuppressedListener> suppressedListeners = new HashMap<>();
 	private final Map<ChunkPos, Integer> mutedAttempts = new HashMap<>();
+	// Relights whose light-engine work has not settled, including ones detached by pause/cancel. They stay visible to the save guard.
+	private final Map<ChunkPos, Integer> unsettled = new ConcurrentHashMap<>();
 	private final Set<ChunkPos> startedCentres = new HashSet<>();
 	private final Map<ChunkPos, CompletableFuture<ChunkAccess>> relightRaw = new ConcurrentHashMap<>();
 	private final Set<ChunkPos> failedCentres = new HashSet<>(); // relights that failed: their in-memory light is unreliable, never saved by us
@@ -303,6 +305,8 @@ public final class ChunkLightWorker {
 			})
 			.thenCompose(initializedChunk -> lightEngine.lightChunk(initializedChunk, false));
 		relightRaw.put(chunkPos, composed);
+		unsettled.merge(chunkPos, 1, Integer::sum);
+		composed.handle((ignored, error) -> null).thenRun(() -> unsettled.computeIfPresent(chunkPos, (key, count) -> count > 1 ? count - 1 : null));
 		return composed.thenApply(relitChunk -> chunk);
 	}
 
@@ -356,10 +360,10 @@ public final class ChunkLightWorker {
 			ChunkPos pos = iterator.next();
 			boolean busy = isBusy(
 				pos,
-				n -> inFlightChunks.containsKey(n),
+				n -> inFlightChunks.containsKey(n) || unsettled.containsKey(n),
 				n -> {
 					InFlightChunk c = inFlightChunks.get(n);
-					return c != null && c.hasRelightFuture() && (!c.relightFuture().isDone() || c.relightFuture().isCompletedExceptionally());
+					return unsettled.containsKey(n) || (c != null && c.hasRelightFuture() && (!c.relightFuture().isDone() || c.relightFuture().isCompletedExceptionally()));
 				},
 				force
 			);

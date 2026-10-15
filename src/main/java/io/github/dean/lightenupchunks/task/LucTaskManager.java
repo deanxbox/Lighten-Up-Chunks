@@ -28,6 +28,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -47,7 +48,9 @@ public final class LucTaskManager {
 
 	private final MinecraftServer server;
 	private final Clock clock;
-	private final ChunkLightWorker worker;
+	// One worker per dimension: its ticket/listener/failure bookkeeping is keyed by chunk position only.
+	private final Map<String, ChunkLightWorker> workers = new HashMap<>();
+	private ChunkLightWorker worker;
 	private final LucProgressBar progressBar;
 	private Path stateFile;
 
@@ -63,7 +66,7 @@ public final class LucTaskManager {
 	private LucTaskManager(MinecraftServer server) {
 		this.server = server;
 		this.clock = Clock.systemUTC();
-		this.worker = new ChunkLightWorker();
+
 		this.progressBar = new LucProgressBar();
 	}
 
@@ -86,7 +89,7 @@ public final class LucTaskManager {
 		LucTaskManager manager = INSTANCES.remove(server);
 		if (manager != null) {
 			manager.persistActiveTaskForShutdown();
-			manager.worker.close();
+			manager.workers.values().forEach(ChunkLightWorker::close);
 		}
 	}
 
@@ -142,6 +145,7 @@ public final class LucTaskManager {
 
 		try {
 			activeTask = loadTask();
+			worker = workers.computeIfAbsent(activeTask.getDimensionId(), ignored -> new ChunkLightWorker());
 			inFlightChunks.clear();
 			pendingAction = PendingAction.NONE;
 			lastChunkSaveFlushAtMillis = clock.millis();
@@ -287,6 +291,7 @@ public final class LucTaskManager {
 			}
 
 			LucTimings.reset();
+			worker = workers.computeIfAbsent(plan.dimension(), ignored -> new ChunkLightWorker());
 			worker.clearDirty();
 			ArrayDeque<ChunkPos> queue = createTaskQueue(relightMode, plan.runnableChunks());
 			activeTask = new LightTask(
