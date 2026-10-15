@@ -7,6 +7,7 @@ import io.github.dean.lightenupchunks.LucConfig;
 import io.github.dean.lightenupchunks.LucConfigManager;
 import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.LightenUpChunks;
+import io.github.dean.lightenupchunks.LucTimings;
 import io.github.dean.lightenupchunks.WorldPathResolver;
 import io.github.dean.lightenupchunks.scanner.BoxScanner;
 import io.github.dean.lightenupchunks.scanner.ChunkRegionScanner;
@@ -285,6 +286,7 @@ public final class LucTaskManager {
 				LightenUpChunks.LOGGER.warn("Failed to clear stale state file {}", stateFile(), exception);
 			}
 
+			LucTimings.reset();
 			ArrayDeque<ChunkPos> queue = createTaskQueue(relightMode, plan.runnableChunks());
 			activeTask = new LightTask(
 				plan.dimension(),
@@ -324,13 +326,18 @@ public final class LucTaskManager {
 
 		try {
 			long nowMillis = clock.millis();
+			LucTimings.TICKS.increment();
+			long tickStart = System.nanoTime();
 			if (pendingAction == PendingAction.NONE) {
 				int skippedOnSubmit = worker.submitChunks(level, activeTask, inFlightChunks, currentMaxInFlight());
 				if (skippedOnSubmit > 0) {
 					activeTask.recordSkipped(skippedOnSubmit, nowMillis);
 				}
 			}
+			long processStart = System.nanoTime();
+			LucTimings.SUBMIT.add(processStart - tickStart);
 			ChunkLightWorker.ProcessResult processed = worker.processLoadedChunks(level, inFlightChunks);
+			LucTimings.PROCESS.add(System.nanoTime() - processStart);
 			nowMillis = clock.millis();
 			activeTask.recordRelit(processed.relit(), nowMillis);
 			activeTask.recordSkipped(processed.skipped(), nowMillis);
@@ -341,7 +348,9 @@ public final class LucTaskManager {
 				pendingChunkSaveFlush = true;
 			}
 			if (pendingChunkSaveFlush && nowMillis - lastChunkSaveFlushAtMillis >= saveFlushIntervalMillis()) {
+				long flushStart = System.nanoTime();
 				flushRelitChunks(level, nowMillis);
+				LucTimings.FLUSH.add(System.nanoTime() - flushStart);
 			}
 			progressBar.update(activeTask, nowMillis, inFlightChunks.size(), currentDisplayChunk());
 			if (pendingAction == PendingAction.PAUSE && inFlightChunks.isEmpty()) {
@@ -364,6 +373,7 @@ public final class LucTaskManager {
 			}
 			if (pendingAction == PendingAction.NONE && activeTask.isComplete() && inFlightChunks.isEmpty()) {
 				LightenUpChunks.LOGGER.info("Completed relight task in {}", activeTask.getDimensionId());
+			LightenUpChunks.LOGGER.info("[LUC timings] {}", LucTimings.summary());
 				flushRelitChunks(level, nowMillis);
 				broadcastCompletion(activeTask, nowMillis);
 				progressBar.stop();

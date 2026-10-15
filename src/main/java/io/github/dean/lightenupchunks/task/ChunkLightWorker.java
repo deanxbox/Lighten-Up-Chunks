@@ -4,6 +4,7 @@ import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.LucConfigManager;
 import io.github.dean.lightenupchunks.LightenUpChunks;
 import io.github.dean.lightenupchunks.LucNoGeneration;
+import io.github.dean.lightenupchunks.LucTimings;
 import net.minecraft.server.level.ChunkMap;
 import io.github.dean.lightenupchunks.VoxyCompat;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkAccessAccessor;
@@ -268,9 +269,16 @@ public final class ChunkLightWorker {
 			LevelChunk retainedChunk = chunkSource.getChunkNow(retainedChunkPos.x, retainedChunkPos.z);
 			if (retainedChunk != null) {
 				retainedChunk.markUnsaved();
+				long t0 = System.nanoTime();
 				chunkMap.lightenupchunks$saveChunk(retainedChunk);
+				long t1 = System.nanoTime();
 				broadcastRelitChunk(level, retainedChunk);
+				long t2 = System.nanoTime();
 				VoxyCompat.notifyChunkRelit(level, retainedChunk);
+				LucTimings.SAVE.add(t1 - t0);
+				LucTimings.SAVES.increment();
+				LucTimings.BROADCAST.add(t2 - t1);
+				LucTimings.VOXY.add(System.nanoTime() - t2);
 			}
 		}
 	}
@@ -361,6 +369,7 @@ public final class ChunkLightWorker {
 		String dimension = LucDimensions.asString(level);
 		return CompletableFuture.supplyAsync(() -> {
 			PersistedLightInspector inspector = inspectorLocal.get();
+			long preflightStart = System.nanoTime();
 			try {
 				if (fullCache.size() > FULL_CACHE_LIMIT) {
 					fullCache.clear();
@@ -395,6 +404,8 @@ public final class ChunkLightWorker {
 			} catch (IOException | RuntimeException exception) {
 				LightenUpChunks.LOGGER.warn("Skipping chunk {} in {}: saved data could not be verified as fully generated", chunkPos, dimension, exception);
 				return List.<ChunkPos>of();
+			} finally {
+				LucTimings.PREFLIGHT.add(System.nanoTime() - preflightStart);
 			}
 		}, inspectionExecutor);
 	}
@@ -553,6 +564,11 @@ public final class ChunkLightWorker {
 
 		private void startRelight(CompletableFuture<ChunkAccess> relightFuture) {
 			this.relightFuture = relightFuture;
+			long started = System.nanoTime();
+			relightFuture.whenComplete((ignored, error) -> {
+				LucTimings.RELIGHT_LATENCY.add(System.nanoTime() - started);
+				LucTimings.RELIGHTS.increment();
+			});
 		}
 
 		private void cancelPendingWork() {
