@@ -8,7 +8,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.StringWidget;
 import net.minecraft.client.gui.screens.Screen;
@@ -36,16 +35,9 @@ public final class LucConfigScreen extends Screen {
 	}
 
 	@Override
-	public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
-		this.extractPanorama(graphics, partialTick);
-		this.extractBlurredBackground(graphics);
-		this.extractMenuBackground(graphics);
-	}
-
-	@Override
 	public void onClose() {
 		if (this.minecraft != null) {
-			this.minecraft.gui.setScreen(parent);
+			this.minecraft.setScreen(parent);
 		}
 	}
 

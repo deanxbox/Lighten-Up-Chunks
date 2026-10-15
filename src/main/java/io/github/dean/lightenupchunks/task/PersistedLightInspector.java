@@ -25,8 +25,8 @@ final class PersistedLightInspector implements AutoCloseable {
 
 	public boolean chunkNeedsLighting(ServerLevel level, ChunkPos chunkPos) throws IOException {
 		Path regionDirectory = resolveRegionDirectory(level);
-		int regionX = Math.floorDiv(chunkPos.x(), 32);
-		int regionZ = Math.floorDiv(chunkPos.z(), 32);
+		int regionX = Math.floorDiv(chunkPos.x, 32);
+		int regionZ = Math.floorDiv(chunkPos.z, 32);
 		Path regionFilePath = regionDirectory.resolve("r." + regionX + "." + regionZ + ".mca");
 		if (!Files.exists(regionFilePath)) {
 			return true;

@@ -752,14 +752,14 @@ public final class LucTaskManager {
 		if (chunkPos == null || failureMessage == null || failureMessage.isBlank()) {
 			return;
 		}
-		builder.append(" | last_failed=").append(chunkPos.x()).append(",").append(chunkPos.z()).append(" (").append(failureMessage).append(")");
+		builder.append(" | last_failed=").append(chunkPos.x).append(",").append(chunkPos.z).append(" (").append(failureMessage).append(")");
 	}
 
 	private static int[] chunkArray(ChunkPos chunkPos) {
 		if (chunkPos == null) {
 			return null;
 		}
-		return new int[] {chunkPos.x(), chunkPos.z()};
+		return new int[] {chunkPos.x, chunkPos.z};
 	}
 
 	private static ChunkPos chunkPos(int[] value) {
@@ -810,7 +810,7 @@ public final class LucTaskManager {
 		List<ChunkPos> retainedChunks = new ArrayList<>((radius * 2 + 1) * (radius * 2 + 1));
 		for (int dx = -radius; dx <= radius; dx++) {
 			for (int dz = -radius; dz <= radius; dz++) {
-				retainedChunks.add(new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz));
+				retainedChunks.add(new ChunkPos(centerChunkPos.x + dx, centerChunkPos.z + dz));
 			}
 		}
 		return retainedChunks;

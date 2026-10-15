@@ -48,7 +48,7 @@ public final class VoxyCompat {
 
 				ChunkPos pos = chunk.getPos();
 				for (int y = level.getMinY(); y < level.getMaxY(); y += 32) {
-					markDirtyHandle.invoke(dirtyTrackerInstance, level, pos.x(), y, pos.z());
+					markDirtyHandle.invoke(dirtyTrackerInstance, level, pos.x, y, pos.z);
 				}
 			} catch (Throwable throwable) {
 				LightenUpChunks.LOGGER.debug("Failed to notify VoxyServer about relit chunk {}", chunk.getPos(), throwable);

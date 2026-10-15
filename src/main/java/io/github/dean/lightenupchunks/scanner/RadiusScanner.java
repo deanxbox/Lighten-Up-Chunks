@@ -41,17 +41,17 @@ public final class RadiusScanner implements ChunkRegionScanner {
 			if (leftDistance != rightDistance) {
 				return Long.compare(leftDistance, rightDistance);
 			}
-			if (left.x() != right.x()) {
-				return Integer.compare(left.x(), right.x());
+			if (left.x != right.x) {
+				return Integer.compare(left.x, right.x);
 			}
-			return Integer.compare(left.z(), right.z());
+			return Integer.compare(left.z, right.z);
 		});
 		return chunkPositions;
 	}
 
 	private boolean intersectsRadius(ChunkPos chunkPos) {
-		int chunkMinX = SectionPos.sectionToBlockCoord(chunkPos.x());
-		int chunkMinZ = SectionPos.sectionToBlockCoord(chunkPos.z());
+		int chunkMinX = SectionPos.sectionToBlockCoord(chunkPos.x);
+		int chunkMinZ = SectionPos.sectionToBlockCoord(chunkPos.z);
 		int chunkMaxX = chunkMinX + 15;
 		int chunkMaxZ = chunkMinZ + 15;
 		int nearestX = clamp(centerBlockX, chunkMinX, chunkMaxX);
@@ -63,8 +63,8 @@ public final class RadiusScanner implements ChunkRegionScanner {
 	}
 
 	private long squaredDistanceFromCenter(ChunkPos chunkPos) {
-		long centerX = SectionPos.sectionToBlockCoord(chunkPos.x()) + 8L;
-		long centerZ = SectionPos.sectionToBlockCoord(chunkPos.z()) + 8L;
+		long centerX = SectionPos.sectionToBlockCoord(chunkPos.x) + 8L;
+		long centerZ = SectionPos.sectionToBlockCoord(chunkPos.z) + 8L;
 		long deltaX = centerBlockX - centerX;
 		long deltaZ = centerBlockZ - centerZ;
 		return deltaX * deltaX + deltaZ * deltaZ;

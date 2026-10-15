@@ -106,7 +106,7 @@ public final class ChunkLightWorker {
 						continue;
 					}
 
-					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x(), chunkPos.z());
+					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
 					if (levelChunk == null) {
 						continue;
 					}
@@ -209,7 +209,7 @@ public final class ChunkLightWorker {
 			if (!shouldSaveChunk(level, retainedChunkPos)) {
 				continue;
 			}
-			LevelChunk retainedChunk = chunkSource.getChunkNow(retainedChunkPos.x(), retainedChunkPos.z());
+			LevelChunk retainedChunk = chunkSource.getChunkNow(retainedChunkPos.x, retainedChunkPos.z);
 			if (retainedChunk != null) {
 				retainedChunk.markUnsaved();
 				chunkMap.lightenupchunks$saveChunk(retainedChunk);
@@ -350,7 +350,7 @@ public final class ChunkLightWorker {
 			if (chunkExistedOnDisk(level, chunkPos)) {
 				continue;
 			}
-			ChunkAccess loadedChunk = level.getChunkSource().getChunk(chunkPos.x(), chunkPos.z(), ChunkStatus.EMPTY, false);
+			ChunkAccess loadedChunk = level.getChunkSource().getChunk(chunkPos.x, chunkPos.z, ChunkStatus.EMPTY, false);
 			if (loadedChunk != null && loadedChunk.isUnsaved()) {
 				((ChunkAccessAccessor) loadedChunk).lightenupchunks$setUnsaved(false);
 			}
@@ -375,7 +375,7 @@ public final class ChunkLightWorker {
 		List<ChunkPos> chunkPositions = new ArrayList<>((radius * 2 + 1) * (radius * 2 + 1));
 		for (int dx = -radius; dx <= radius; dx++) {
 			for (int dz = -radius; dz <= radius; dz++) {
-				chunkPositions.add(new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz));
+				chunkPositions.add(new ChunkPos(centerChunkPos.x + dx, centerChunkPos.z + dz));
 			}
 		}
 		return chunkPositions;

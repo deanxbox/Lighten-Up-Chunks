@@ -20,11 +20,11 @@ public final class RegionFileProbe {
 	private final Map<Long, BitSet> headerCache = new HashMap<>();
 
 	public boolean chunkExists(ServerLevel level, ChunkPos chunkPos) throws IOException {
-		int regionX = Math.floorDiv(chunkPos.x(), 32);
-		int regionZ = Math.floorDiv(chunkPos.z(), 32);
+		int regionX = Math.floorDiv(chunkPos.x, 32);
+		int regionZ = Math.floorDiv(chunkPos.z, 32);
 		BitSet occupancy = loadHeader(level, regionX, regionZ);
-		int localX = Math.floorMod(chunkPos.x(), 32);
-		int localZ = Math.floorMod(chunkPos.z(), 32);
+		int localX = Math.floorMod(chunkPos.x, 32);
+		int localZ = Math.floorMod(chunkPos.z, 32);
 		return occupancy.get(localZ * 32 + localX);
 	}
 
