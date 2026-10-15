@@ -1,5 +1,6 @@
 plugins {
-	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'com.modrinth.minotaur' version '2.10.0'
+	id 'fabric-loom' version "${loom_version}"
 	id 'maven-publish'
 }
 
@@ -19,9 +20,10 @@ repositories {
 
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-	compileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	modCompileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
 	testImplementation platform("org.junit:junit-bom:5.12.2")
 	testImplementation "org.junit.jupiter:junit-jupiter"
 	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
@@ -36,7 +38,7 @@ processResources {
 }
 
 tasks.withType(JavaCompile).configureEach {
-	it.options.release = 25
+	it.options.release = 21
 }
 
 tasks.named("test") {
@@ -46,8 +48,8 @@ tasks.named("test") {
 java {
 	withSourcesJar()
 
-	sourceCompatibility = JavaVersion.VERSION_25
-	targetCompatibility = JavaVersion.VERSION_25
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
 }
 
 jar {
@@ -55,6 +57,52 @@ jar {
 
 	from("LICENSE") {
 		rename { "${it}_${inputs.properties.archivesName}"}
+	}
+}
+
+def projectPathHasBang = project.projectDir.absolutePath.contains('!')
+if (projectPathHasBang) {
+	def safeRemapRoot = new File(project.rootDir.parentFile, ".lighten-up-chunks-safe-remap")
+	def safeJarInputDir = new File(safeRemapRoot, "jar-input")
+	def safeSourcesInputDir = new File(safeRemapRoot, "sources-input")
+	def safeJarOutputDir = new File(safeRemapRoot, "jar-output")
+	def safeSourcesOutputDir = new File(safeRemapRoot, "sources-output")
+	def safeJarInputName = "${project.archives_base_name}-${project.version}-jar-input.jar"
+	def safeSourcesInputName = "${project.archives_base_name}-${project.version}-sources-input.jar"
+
+	def prepareSafeRemapJarInput = tasks.register("prepareSafeRemapJarInput", Copy) {
+		from(tasks.named("jar").flatMap { it.archiveFile })
+		into(safeJarInputDir)
+		rename { safeJarInputName }
+	}
+
+	def prepareSafeRemapSourcesInput = tasks.register("prepareSafeRemapSourcesInput", Copy) {
+		from(tasks.named("sourcesJar").flatMap { it.archiveFile })
+		into(safeSourcesInputDir)
+		rename { safeSourcesInputName }
+	}
+
+	tasks.named("remapJar", net.fabricmc.loom.task.RemapJarTask) {
+		dependsOn(prepareSafeRemapJarInput)
+		inputFile.set(file(new File(safeJarInputDir, safeJarInputName)))
+		destinationDirectory.set(file(safeJarOutputDir))
+	}
+
+	tasks.named("remapSourcesJar", net.fabricmc.loom.task.RemapSourcesJarTask) {
+		dependsOn(prepareSafeRemapSourcesInput)
+		inputFile.set(file(new File(safeSourcesInputDir, safeSourcesInputName)))
+		destinationDirectory.set(file(safeSourcesOutputDir))
+	}
+
+	def syncPublishedArtifacts = tasks.register("syncPublishedArtifacts", Sync) {
+		dependsOn(tasks.named("remapJar"), tasks.named("remapSourcesJar"))
+		from(tasks.named("remapJar").flatMap { it.archiveFile })
+		from(tasks.named("remapSourcesJar").flatMap { it.archiveFile })
+		into(layout.buildDirectory.dir("libs"))
+	}
+
+	tasks.named("build") {
+		finalizedBy(syncPublishedArtifacts)
 	}
 }
 
@@ -66,5 +114,28 @@ publishing {
 		}
 	}
 	repositories {
+	}
+}
+
+// Publish with: MODRINTH_KEY=... ./gradlew modrinth (CI does this on v* tags).
+modrinth {
+	token = System.getenv("MODRINTH_KEY")
+	projectId = "lighten-up-chunks"
+	versionNumber = "${project.mod_version}+${project.minecraft_version}"
+	versionName = "Lighten Up, Chunks! ${project.mod_version} for Minecraft ${project.minecraft_version}"
+	versionType = "release"
+	uploadFile = tasks.named("remapJar")
+	gameVersions = project.modrinth_game_versions.split(",").collect { it.trim() }
+	loaders = ["fabric"]
+	// Uses this branch's CHANGELOG.md section titled "## <mod_version>".
+	changelog = providers.provider {
+		def text = file("CHANGELOG.md").text
+		def matcher = text =~ /(?ms)^## \[?${java.util.regex.Pattern.quote(project.mod_version)}\]?[^\r\n]*\R(.*?)(?=^## |\z)/
+		if (!matcher.find()) throw new GradleException("CHANGELOG.md has no '## ${project.mod_version}' section")
+		matcher.group(1).trim()
+	}
+	dependencies {
+		required.project "fabric-api"
+		optional.project "modmenu"
 	}
 }

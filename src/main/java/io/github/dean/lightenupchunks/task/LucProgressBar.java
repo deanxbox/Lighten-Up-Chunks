@@ -21,7 +21,6 @@ public final class LucProgressBar {
 
 	public LucProgressBar() {
 		this.bossBar = new ServerBossEvent(
-			UUID.randomUUID(),
 			Component.literal("Lighten Up, Chunks!"),
 			enumValue(BossEvent.BossBarColor.class, "GREEN"),
 			enumValue(BossEvent.BossBarOverlay.class, "PROGRESS")
@@ -63,7 +62,7 @@ public final class LucProgressBar {
 			parts.add(remaining + " left");
 		}
 		if (config.bossBarShowCurrentChunk && currentChunk != null) {
-			parts.add("chunk " + currentChunk.x() + ", " + currentChunk.z());
+			parts.add("chunk " + currentChunk.x + ", " + currentChunk.z);
 		}
 		if (config.bossBarShowRate) {
 			parts.add(RATE_FORMAT.format(rate) + " c/s");

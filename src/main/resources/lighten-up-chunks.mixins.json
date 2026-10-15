@@ -1,10 +1,13 @@
 {
 	"required": true,
 	"package": "io.github.dean.lightenupchunks.mixin",
-	"compatibilityLevel": "JAVA_25",
+	"compatibilityLevel": "JAVA_21",
 	"mixins": [
 		"accessor.ChunkAccessAccessor",
-		"accessor.ChunkMapInvoker"
+		"accessor.LevelChunkAccessor",
+		"accessor.ChunkMapInvoker",
+		"ChunkGenerationTaskMixin",
+		"ChunkMapMixin"
 	],
 	"client": [
 		"client.MinecraftPauseMixin"
@@ -13,3 +16,5 @@
 		"defaultRequire": 1
 	}
 }
+
+

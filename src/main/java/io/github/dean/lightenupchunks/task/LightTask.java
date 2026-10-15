@@ -190,7 +190,7 @@ public final class LightTask {
 	public List<int[]> snapshotRemainingChunks() {
 		List<int[]> remaining = new ArrayList<>(pendingChunks.size());
 		for (ChunkPos chunkPos : pendingChunks) {
-			remaining.add(new int[] {chunkPos.x(), chunkPos.z()});
+			remaining.add(new int[] {chunkPos.x, chunkPos.z});
 		}
 		return remaining;
 	}
