@@ -287,6 +287,7 @@ public final class LucTaskManager {
 			}
 
 			LucTimings.reset();
+			worker.clearDirty();
 			ArrayDeque<ChunkPos> queue = createTaskQueue(relightMode, plan.runnableChunks());
 			activeTask = new LightTask(
 				plan.dimension(),
@@ -328,17 +329,19 @@ public final class LucTaskManager {
 			long nowMillis = clock.millis();
 			LucTimings.TICKS.increment();
 			long tickStart = System.nanoTime();
+			long processStart = System.nanoTime();
+			ChunkLightWorker.ProcessResult processed = worker.processLoadedChunks(level, inFlightChunks);
+			LucTimings.PROCESS.add(System.nanoTime() - processStart);
+			nowMillis = clock.millis();
+			// Refill after processing so slots freed this tick start their disk preflight immediately, not a tick later.
+			long submitStart = System.nanoTime();
 			if (pendingAction == PendingAction.NONE) {
 				int skippedOnSubmit = worker.submitChunks(level, activeTask, inFlightChunks, currentMaxInFlight());
 				if (skippedOnSubmit > 0) {
 					activeTask.recordSkipped(skippedOnSubmit, nowMillis);
 				}
 			}
-			long processStart = System.nanoTime();
-			LucTimings.SUBMIT.add(processStart - tickStart);
-			ChunkLightWorker.ProcessResult processed = worker.processLoadedChunks(level, inFlightChunks);
-			LucTimings.PROCESS.add(System.nanoTime() - processStart);
-			nowMillis = clock.millis();
+			LucTimings.SUBMIT.add(System.nanoTime() - submitStart);
 			activeTask.recordRelit(processed.relit(), nowMillis);
 			activeTask.recordSkipped(processed.skipped(), nowMillis);
 			for (ChunkLightWorker.FailureRecord failure : processed.failures()) {
@@ -608,11 +611,13 @@ public final class LucTaskManager {
 			return;
 		}
 
-		List<ChunkPos> chunksToReturn = List.copyOf(inFlightChunks.keySet());
+		List<ChunkPos> chunksToReturn = new ArrayList<>(inFlightChunks.keySet());
 		ServerLevel level = findLevel(task.getDimensionId());
 		if (level != null) {
+			chunksToReturn.addAll(worker.flushDirty(level, inFlightChunks, true));
 			worker.releaseAll(level, inFlightChunks);
 		}
+		worker.clearDirty();
 		task.returnChunks(chunksToReturn);
 		inFlightChunks.clear();
 	}
