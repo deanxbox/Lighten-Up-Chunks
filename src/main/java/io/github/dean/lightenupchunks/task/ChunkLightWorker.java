@@ -212,7 +212,7 @@ public final class ChunkLightWorker {
 	private final Map<ChunkPos, Integer> unsettled = new ConcurrentHashMap<>();
 	private final Set<ChunkPos> startedCentres = new HashSet<>();
 	private final Map<ChunkPos, CompletableFuture<ChunkAccess>> relightRaw = new ConcurrentHashMap<>();
-	private final Set<ChunkPos> failedCentres = new HashSet<>(); // relights that failed: their in-memory light is unreliable, never saved by us
+	private final Set<ChunkPos> failedCentres = ConcurrentHashMap.newKeySet(); // relights that failed: their in-memory light is unreliable, never saved by us
 
 	// Server thread only: restoring re-fires the listener if the chunk is unsaved, and C2ME rejects that off-thread.
 	private static void restoreListener(SuppressedListener suppressed) {
@@ -230,7 +230,7 @@ public final class ChunkLightWorker {
 			if (started) {
 				// A failed or interrupted relight leaves partial light in memory: flag it as not-correct so that whatever persists it
 				// (vanilla autosave/unload) records "light not valid" and vanilla relights it on next load, rather than trusting it.
-				if (unsettled || failedCentres.contains(chunkPos) || (raw != null && raw.isCompletedExceptionally())) {
+				if (failedCentres.contains(chunkPos) || (raw != null && raw.isCompletedExceptionally())) {
 					failedCentres.add(chunkPos);
 					SuppressedListener s = suppressedListeners.get(chunkPos);
 					if (s != null) {
@@ -306,7 +306,14 @@ public final class ChunkLightWorker {
 			.thenCompose(initializedChunk -> lightEngine.lightChunk(initializedChunk, false));
 		relightRaw.put(chunkPos, composed);
 		unsettled.merge(chunkPos, 1, Integer::sum);
-		composed.handle((ignored, error) -> null).thenRun(() -> unsettled.computeIfPresent(chunkPos, (key, count) -> count > 1 ? count - 1 : null));
+		// Record a failure the instant the engine finishes (any thread), and only then lower the guard on the server thread, so a flush can
+		// never see "no unsettled attempt and no failure marker" for a chunk whose light is bad.
+		composed.handle((ignored, error) -> error).thenAccept(error -> {
+			if (error != null) {
+				failedCentres.add(chunkPos);
+			}
+			level.getServer().execute(() -> unsettled.computeIfPresent(chunkPos, (key, count) -> count > 1 ? count - 1 : null));
+		});
 		return composed.thenApply(relitChunk -> chunk);
 	}
 
