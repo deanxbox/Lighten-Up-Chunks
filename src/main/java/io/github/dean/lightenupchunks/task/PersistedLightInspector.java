@@ -62,7 +62,7 @@ final class PersistedLightInspector implements AutoCloseable {
 		}
 		int length = head.getInt(0);
 		int version = head.get(4) & 0xFF;
-		if (length <= 1 || length - 1 > sectors * SECTOR_BYTES || (version & 0x80) != 0) {
+		if (length <= 1 || length > sectors * SECTOR_BYTES - 4 || (version & 0x80) != 0) {
 			return null;
 		}
 		RegionFileVersion regionVersion = RegionFileVersion.fromId(version);
