@@ -36,4 +36,15 @@ class LucNoGenerationTest {
 		LucNoGeneration.release(map, List.of(shared));
 		assertFalse(LucNoGeneration.vetoGeneration(map, shared));
 	}
+
+	@Test
+	void releaseAfterVetoUnblocksAndForgetsMap() {
+		Object map = new Object();
+		ChunkPos pos = new ChunkPos(1, 1);
+		LucNoGeneration.claim(map, List.of(pos));
+		assertTrue(LucNoGeneration.vetoGeneration(map, pos));
+		LucNoGeneration.release(map, List.of(pos));
+		assertFalse(LucNoGeneration.anyBlocked(map, List.of(pos)));
+		assertFalse(LucNoGeneration.vetoGeneration(map, pos));
+	}
 }
