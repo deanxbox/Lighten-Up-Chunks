@@ -4,6 +4,7 @@ import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.LucConfigManager;
 import io.github.dean.lightenupchunks.LightenUpChunks;
 import io.github.dean.lightenupchunks.LucNoGeneration;
+import net.minecraft.server.level.ChunkMap;
 import io.github.dean.lightenupchunks.VoxyCompat;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkAccessAccessor;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkMapInvoker;
@@ -105,11 +106,11 @@ public final class ChunkLightWorker {
 							continue;
 						}
 						retainLightData(level, inFlightChunk.retainedChunks());
-						LucNoGeneration.claim(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks());
+						LucNoGeneration.claim(level.getChunkSource().chunkMap, chunkArea(chunkPos, PREFLIGHT_RADIUS));
 						inFlightChunk.startLoad(loadRetainedArea(level, inFlightChunk.retainedChunks()));
 						continue;
 					}
-					if (LucNoGeneration.anyBlocked(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks())) {
+					if (LucNoGeneration.anyBlocked(level.getChunkSource().chunkMap, chunkArea(chunkPos, PREFLIGHT_RADIUS))) {
 						// Vanilla wanted to generate part of this area; the veto kept disk data untouched.
 						skipped++;
 						finished = true;
@@ -188,7 +189,6 @@ public final class ChunkLightWorker {
 		if (inFlightChunk.loadStarted()) {
 			releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
 			releaseLightData(level, inFlightChunk.retainedChunks());
-			LucNoGeneration.release(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks());
 		}
 	}
 
@@ -366,7 +366,7 @@ public final class ChunkLightWorker {
 	}
 
 	private boolean shouldSaveChunk(ServerLevel level, ChunkPos chunkPos) {
-		return true; // The whole area was verified FULL on disk and loaded before relighting.
+		return !LucNoGeneration.wasReplaced(level.getChunkSource().chunkMap, chunkPos); // never overwrite disk data with a vanilla replacement chunk
 	}
 	private List<ChunkPos> chunkArea(ChunkPos centerChunkPos, int radius) {
 		List<ChunkPos> chunkPositions = new ArrayList<>((radius * 2 + 1) * (radius * 2 + 1));
@@ -466,6 +466,10 @@ public final class ChunkLightWorker {
 
 		private Preflight preflight() {
 			return preflightFuture.join();
+		}
+
+		private CompletableFuture<?> loadFuture() {
+			return loadFuture;
 		}
 
 		private boolean loadStarted() {
