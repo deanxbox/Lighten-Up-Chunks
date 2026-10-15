@@ -96,7 +96,11 @@ final class PersistedLightInspector implements AutoCloseable {
 		// Vanilla replaces undeserialisable chunks with generated ones, so reject obviously corrupt block storage here.
 		ListTag sections = chunkTag.getListOrEmpty("sections");
 		for (int index = 0; index < sections.size(); index++) {
-			CompoundTag blockStates = sections.getCompoundOrEmpty(index).getCompoundOrEmpty("block_states");
+			CompoundTag section = sections.getCompoundOrEmpty(index);
+			if (section.contains("block_states") && section.getCompound("block_states").isEmpty()) {
+				return false; // wrong tag type: vanilla would silently swap in an empty section
+			}
+			CompoundTag blockStates = section.getCompoundOrEmpty("block_states");
 			if (blockStates.getListOrEmpty("palette").size() > 1 && !blockStates.contains("data")) {
 				return false;
 			}
