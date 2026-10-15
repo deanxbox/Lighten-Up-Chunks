@@ -124,7 +124,7 @@ modrinth {
 	versionNumber = "${project.mod_version}+${project.minecraft_version}"
 	versionName = "Lighten Up, Chunks! ${project.mod_version} for Minecraft ${project.minecraft_version}"
 	versionType = "release"
-	uploadFile = tasks.named("jar")
+	uploadFile = tasks.named("remapJar")
 	gameVersions = project.modrinth_game_versions.split(",").collect { it.trim() }
 	loaders = ["fabric"]
 	// Uses this branch's CHANGELOG.md section titled "## <mod_version>".
