@@ -3,6 +3,7 @@ package io.github.dean.lightenupchunks.task;
 import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.LucConfigManager;
 import io.github.dean.lightenupchunks.LightenUpChunks;
+import io.github.dean.lightenupchunks.LucNoGeneration;
 import io.github.dean.lightenupchunks.VoxyCompat;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkAccessAccessor;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkMapInvoker;
@@ -104,7 +105,14 @@ public final class ChunkLightWorker {
 							continue;
 						}
 						retainLightData(level, inFlightChunk.retainedChunks());
+						LucNoGeneration.claim(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks());
 						inFlightChunk.startLoad(loadRetainedArea(level, inFlightChunk.retainedChunks()));
+						continue;
+					}
+					if (LucNoGeneration.anyBlocked(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks())) {
+						// Vanilla wanted to generate part of this area; the veto kept disk data untouched.
+						skipped++;
+						finished = true;
 						continue;
 					}
 					if (!inFlightChunk.loadReady()) {
@@ -180,6 +188,7 @@ public final class ChunkLightWorker {
 		if (inFlightChunk.loadStarted()) {
 			releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
 			releaseLightData(level, inFlightChunk.retainedChunks());
+			LucNoGeneration.release(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks());
 		}
 	}
 
