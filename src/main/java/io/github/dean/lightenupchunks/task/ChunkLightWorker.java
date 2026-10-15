@@ -100,18 +100,19 @@ public final class ChunkLightWorker {
 						if (!inFlightChunk.preflightDone()) {
 							continue;
 						}
-						Preflight verdict = inFlightChunk.preflight();
-						if (verdict != Preflight.RELIGHT) {
+						List<ChunkPos> usable = inFlightChunk.preflight();
+						if (usable.isEmpty()) {
 							skipped++;
 							finished = true;
 							continue;
 						}
+						inFlightChunk.retainedChunks = usable;
 						retainLightData(level, inFlightChunk.retainedChunks());
 						LucNoGeneration.claim(level.getChunkSource().chunkMap, chunkArea(chunkPos, PREFLIGHT_RADIUS));
 						inFlightChunk.startLoad(loadRetainedArea(level, inFlightChunk.retainedChunks()));
 						continue;
 					}
-					if (LucNoGeneration.anyBlocked(level.getChunkSource().chunkMap, chunkArea(chunkPos, PREFLIGHT_RADIUS))) {
+					if (LucNoGeneration.anyBlocked(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks())) {
 						// Vanilla wanted to generate part of this area; the veto kept disk data untouched.
 						skipped++;
 						finished = true;
@@ -348,13 +349,14 @@ public final class ChunkLightWorker {
 		}
 	}
 
-	private enum Preflight { RELIGHT, SKIP }
 
 	/**
 	 * Runs off-thread before any ticket is added. Every chunk in the area must be saved as minecraft:full;
 	 * a partial chunk would be generated further by the FULL ticket, so the whole area is skipped instead.
 	 */
-	private CompletableFuture<Preflight> createPreflightFuture(ServerLevel level, LightTask task, ChunkPos chunkPos, List<ChunkPos> area) {
+	// Result: the 3x3 neighbours that are FULL on disk (centre included); empty means skip. Missing/partial neighbours at the world edge are
+	// simply not loaded (never generated), so edge chunks still relight.
+	private CompletableFuture<List<ChunkPos>> createPreflightFuture(ServerLevel level, LightTask task, ChunkPos chunkPos, List<ChunkPos> area) {
 		boolean missingOnly = task.inspectMissingLightOnly();
 		String dimension = LucDimensions.asString(level);
 		return CompletableFuture.supplyAsync(() -> {
@@ -364,6 +366,7 @@ public final class ChunkLightWorker {
 					fullCache.clear();
 				}
 				boolean needsLight = true;
+				Set<ChunkPos> full = new HashSet<>();
 				for (ChunkPos pos : area) {
 					String key = dimension + ":" + pos.x + "," + pos.z;
 					Boolean cached = fullCache.get(key);
@@ -377,14 +380,21 @@ public final class ChunkLightWorker {
 							needsLight = PersistedLightInspector.lacksStoredLightData(tag, level.dimensionType().hasSkyLight());
 						}
 					}
-					if (!cached) {
-						return Preflight.SKIP;
+					if (cached) {
+						full.add(pos);
+					} else if (pos.equals(chunkPos)) {
+						return List.<ChunkPos>of();
 					}
 				}
-				return missingOnly && !needsLight ? Preflight.SKIP : Preflight.RELIGHT;
+				if (missingOnly && !needsLight) {
+					return List.<ChunkPos>of();
+				}
+				List<ChunkPos> usable = new ArrayList<>(ticketArea(chunkPos));
+				usable.removeIf(pos -> !full.contains(pos));
+				return usable;
 			} catch (IOException | RuntimeException exception) {
 				LightenUpChunks.LOGGER.warn("Skipping chunk {} in {}: saved data could not be verified as fully generated", chunkPos, dimension, exception);
-				return Preflight.SKIP;
+				return List.<ChunkPos>of();
 			}
 		}, inspectionExecutor);
 	}
@@ -483,13 +493,13 @@ public final class ChunkLightWorker {
 
 	public static final class InFlightChunk {
 		private final ChunkPos chunkPos;
-		private final List<ChunkPos> retainedChunks;
-		private final CompletableFuture<Preflight> preflightFuture;
+		private List<ChunkPos> retainedChunks;
+		private final CompletableFuture<List<ChunkPos>> preflightFuture;
 		private CompletableFuture<?> loadFuture;
 		private CompletableFuture<ChunkAccess> relightFuture;
 		private CompletableFuture<?> settledFuture;
 
-		private InFlightChunk(ChunkPos chunkPos, List<ChunkPos> retainedChunks, CompletableFuture<Preflight> preflightFuture) {
+		private InFlightChunk(ChunkPos chunkPos, List<ChunkPos> retainedChunks, CompletableFuture<List<ChunkPos>> preflightFuture) {
 			this.chunkPos = chunkPos;
 			this.retainedChunks = retainedChunks;
 			this.preflightFuture = preflightFuture;
@@ -507,7 +517,7 @@ public final class ChunkLightWorker {
 			return preflightFuture.isDone();
 		}
 
-		private Preflight preflight() {
+		private List<ChunkPos> preflight() {
 			return preflightFuture.join();
 		}
 
