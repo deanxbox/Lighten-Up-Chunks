@@ -25,14 +25,14 @@ public final class LucNoGeneration {
 		return ((long) pos.x() << 32) | (pos.z() & 0xFFFFFFFFL);
 	}
 
-	public static void claim(Object chunkMap, Collection<ChunkPos> positions) {
+	public static synchronized void claim(Object chunkMap, Collection<ChunkPos> positions) {
 		Map<Long, AtomicInteger> claims = CLAIMED.computeIfAbsent(chunkMap, ignored -> new ConcurrentHashMap<>());
 		for (ChunkPos pos : positions) {
 			claims.computeIfAbsent(key(pos), ignored -> new AtomicInteger()).incrementAndGet();
 		}
 	}
 
-	public static void release(Object chunkMap, Collection<ChunkPos> positions) {
+	public static synchronized void release(Object chunkMap, Collection<ChunkPos> positions) {
 		Map<Long, AtomicInteger> claims = CLAIMED.get(chunkMap);
 		if (claims == null) {
 			return;
@@ -50,10 +50,11 @@ public final class LucNoGeneration {
 				return null;
 			});
 		}
+		cleanup(chunkMap);
 	}
 
 	/** Called from the generation mixin; true means generation must not start for this chunk. */
-	public static boolean vetoGeneration(Object chunkMap, ChunkPos pos) {
+	public static synchronized boolean vetoGeneration(Object chunkMap, ChunkPos pos) {
 		Map<Long, AtomicInteger> claims = CLAIMED.get(chunkMap);
 		if (claims == null || !claims.containsKey(key(pos))) {
 			return false;
@@ -72,7 +73,7 @@ public final class LucNoGeneration {
 		return replaced != null && replaced.contains(key(pos));
 	}
 
-	public static boolean anyBlocked(Object chunkMap, Collection<ChunkPos> positions) {
+	public static synchronized boolean anyBlocked(Object chunkMap, Collection<ChunkPos> positions) {
 		Set<Long> blocked = BLOCKED.get(chunkMap);
 		if (blocked == null || blocked.isEmpty()) {
 			return false;
@@ -86,7 +87,7 @@ public final class LucNoGeneration {
 	}
 
 	// Drop per-ChunkMap state once nothing is claimed so closed dimensions are not retained.
-	static void cleanup(Object chunkMap) {
+	static synchronized void cleanup(Object chunkMap) {
 		Map<Long, AtomicInteger> claims = CLAIMED.get(chunkMap);
 		if (claims != null && claims.isEmpty()) {
 			CLAIMED.remove(chunkMap, claims);
