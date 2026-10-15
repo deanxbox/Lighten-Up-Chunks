@@ -7,6 +7,7 @@ import io.github.dean.lightenupchunks.LucConfig;
 import io.github.dean.lightenupchunks.LucConfigManager;
 import io.github.dean.lightenupchunks.LucDimensions;
 import io.github.dean.lightenupchunks.LightenUpChunks;
+import io.github.dean.lightenupchunks.LucTimings;
 import io.github.dean.lightenupchunks.WorldPathResolver;
 import io.github.dean.lightenupchunks.scanner.BoxScanner;
 import io.github.dean.lightenupchunks.scanner.ChunkRegionScanner;
@@ -27,6 +28,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
@@ -46,7 +48,9 @@ public final class LucTaskManager {
 
 	private final MinecraftServer server;
 	private final Clock clock;
-	private final ChunkLightWorker worker;
+	// One worker per dimension: its ticket/listener/failure bookkeeping is keyed by chunk position only.
+	private final Map<String, ChunkLightWorker> workers = new HashMap<>();
+	private ChunkLightWorker worker;
 	private final LucProgressBar progressBar;
 	private Path stateFile;
 
@@ -56,13 +60,13 @@ public final class LucTaskManager {
 	private long lastChunkSaveFlushAtMillis;
 	private boolean pendingChunkSaveFlush;
 	private String configuredDimension = LucDimensions.OVERWORLD;
-	private ConfiguredScan configuredScan = ConfiguredScan.square(0, 0, 500, 500);
+	private ConfiguredScan configuredScan = ConfiguredScan.world();
 	private RelightMode configuredRelightMode = configuredDefaultRelightMode();
 
 	private LucTaskManager(MinecraftServer server) {
 		this.server = server;
 		this.clock = Clock.systemUTC();
-		this.worker = new ChunkLightWorker();
+
 		this.progressBar = new LucProgressBar();
 	}
 
@@ -85,7 +89,7 @@ public final class LucTaskManager {
 		LucTaskManager manager = INSTANCES.remove(server);
 		if (manager != null) {
 			manager.persistActiveTaskForShutdown();
-			manager.worker.close();
+			manager.workers.values().forEach(ChunkLightWorker::close);
 		}
 	}
 
@@ -141,6 +145,7 @@ public final class LucTaskManager {
 
 		try {
 			activeTask = loadTask();
+			worker = workers.computeIfAbsent(activeTask.getDimensionId(), ignored -> new ChunkLightWorker());
 			inFlightChunks.clear();
 			pendingAction = PendingAction.NONE;
 			lastChunkSaveFlushAtMillis = clock.millis();
@@ -285,6 +290,9 @@ public final class LucTaskManager {
 				LightenUpChunks.LOGGER.warn("Failed to clear stale state file {}", stateFile(), exception);
 			}
 
+			LucTimings.reset();
+			worker = workers.computeIfAbsent(plan.dimension(), ignored -> new ChunkLightWorker());
+			worker.clearDirty();
 			ArrayDeque<ChunkPos> queue = createTaskQueue(relightMode, plan.runnableChunks());
 			activeTask = new LightTask(
 				plan.dimension(),
@@ -324,14 +332,21 @@ public final class LucTaskManager {
 
 		try {
 			long nowMillis = clock.millis();
+			LucTimings.TICKS.increment();
+			long tickStart = System.nanoTime();
+			long processStart = System.nanoTime();
+			ChunkLightWorker.ProcessResult processed = worker.processLoadedChunks(level, inFlightChunks);
+			LucTimings.PROCESS.add(System.nanoTime() - processStart);
+			nowMillis = clock.millis();
+			// Refill after processing so slots freed this tick start their disk preflight immediately, not a tick later.
+			long submitStart = System.nanoTime();
 			if (pendingAction == PendingAction.NONE) {
 				int skippedOnSubmit = worker.submitChunks(level, activeTask, inFlightChunks, currentMaxInFlight());
 				if (skippedOnSubmit > 0) {
 					activeTask.recordSkipped(skippedOnSubmit, nowMillis);
 				}
 			}
-			ChunkLightWorker.ProcessResult processed = worker.processLoadedChunks(level, inFlightChunks);
-			nowMillis = clock.millis();
+			LucTimings.SUBMIT.add(System.nanoTime() - submitStart);
 			activeTask.recordRelit(processed.relit(), nowMillis);
 			activeTask.recordSkipped(processed.skipped(), nowMillis);
 			for (ChunkLightWorker.FailureRecord failure : processed.failures()) {
@@ -341,7 +356,9 @@ public final class LucTaskManager {
 				pendingChunkSaveFlush = true;
 			}
 			if (pendingChunkSaveFlush && nowMillis - lastChunkSaveFlushAtMillis >= saveFlushIntervalMillis()) {
+				long flushStart = System.nanoTime();
 				flushRelitChunks(level, nowMillis);
+				LucTimings.FLUSH.add(System.nanoTime() - flushStart);
 			}
 			progressBar.update(activeTask, nowMillis, inFlightChunks.size(), currentDisplayChunk());
 			if (pendingAction == PendingAction.PAUSE && inFlightChunks.isEmpty()) {
@@ -362,8 +379,10 @@ public final class LucTaskManager {
 				Files.deleteIfExists(stateFile());
 				return;
 			}
-			if (pendingAction == PendingAction.NONE && activeTask.isComplete() && inFlightChunks.isEmpty()) {
+			// hasDirty: saves still waiting on a neighbour (or a detached relight) must drain before the task may finish.
+			if (pendingAction == PendingAction.NONE && activeTask.isComplete() && inFlightChunks.isEmpty() && !worker.hasDirty()) {
 				LightenUpChunks.LOGGER.info("Completed relight task in {}", activeTask.getDimensionId());
+			LightenUpChunks.LOGGER.info("[LUC timings] {}", LucTimings.summary());
 				flushRelitChunks(level, nowMillis);
 				broadcastCompletion(activeTask, nowMillis);
 				progressBar.stop();
@@ -594,15 +613,17 @@ public final class LucTaskManager {
 	}
 
 	private void requeueInFlightChunks(LightTask task) {
-		if (task == null || inFlightChunks.isEmpty()) {
+		if (task == null || (inFlightChunks.isEmpty() && !worker.hasDirty())) {
 			return;
 		}
 
-		List<ChunkPos> chunksToReturn = List.copyOf(inFlightChunks.keySet());
+		List<ChunkPos> chunksToReturn = new ArrayList<>(inFlightChunks.keySet());
 		ServerLevel level = findLevel(task.getDimensionId());
 		if (level != null) {
+			chunksToReturn.addAll(worker.flushDirty(level, inFlightChunks, true));
 			worker.releaseAll(level, inFlightChunks);
 		}
+		worker.clearDirty();
 		task.returnChunks(chunksToReturn);
 		inFlightChunks.clear();
 	}
