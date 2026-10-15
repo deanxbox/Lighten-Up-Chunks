@@ -155,7 +155,7 @@ public final class ChunkLightWorker {
 				if (relitChunk instanceof LevelChunk levelChunk) {
 					levelChunk.markUnsaved();
 				}
-				saveRelitArea(level, inFlightChunk.retainedChunks(), savedThisTick);
+				saveRelitArea(level, inFlightChunk.retainedChunks(), savedThisTick, inFlightChunks);
 				relit++;
 				finished = true;
 			} catch (CompletionException exception) {
@@ -238,10 +238,15 @@ public final class ChunkLightWorker {
 			.thenApply(relitChunk -> chunk);
 	}
 
-	private void saveRelitArea(ServerLevel level, List<ChunkPos> retainedChunks, Set<ChunkPos> savedThisTick) {
+	private void saveRelitArea(ServerLevel level, List<ChunkPos> retainedChunks, Set<ChunkPos> savedThisTick, Map<ChunkPos, InFlightChunk> inFlightChunks) {
 		ServerChunkCache chunkSource = level.getChunkSource();
 		ChunkMapInvoker chunkMap = (ChunkMapInvoker) chunkSource.chunkMap;
 		for (ChunkPos retainedChunkPos : retainedChunks) {
+			// A neighbour mid-relight has its light cleared; saving/ingesting it now would store dark light. It saves itself when done.
+			InFlightChunk neighbour = inFlightChunks.get(retainedChunkPos);
+			if (neighbour != null && neighbour.hasRelightFuture() && !neighbour.relightFuture().isDone()) {
+				continue;
+			}
 			if (!savedThisTick.add(retainedChunkPos) || !shouldSaveChunk(level, retainedChunkPos)) {
 				continue;
 			}
