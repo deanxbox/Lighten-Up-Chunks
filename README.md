@@ -1,8 +1,19 @@
 # Lighten Up, Chunks!
 
-Server-side chunk relighting for existing Fabric worlds on Minecraft `26.2`.
+Server-side chunk relighting for existing Fabric worlds on Minecraft `26.3`.
 
 This mod is aimed at repairing broken saved lighting in bulk without asking admins to fly around and trigger chunk updates manually.
+
+## Requirements and Build
+
+- Minecraft `26.3`
+- Java `25` or newer
+- Fabric Loader `0.19.5` or newer
+- Fabric API `0.161.0+26.3` or newer for Minecraft `26.3`
+- Optional: Mod Menu `21.0.0` for the singleplayer config screen
+
+Build and run the tests with `./gradlew build` (`.\gradlew.bat build` on Windows).
+The mod JAR is written to `build/libs/lighten-up-chunks-1.3.0.jar`.
 
 ## What It Does
 
