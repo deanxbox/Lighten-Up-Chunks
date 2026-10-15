@@ -130,7 +130,16 @@ public final class ChunkLightWorker {
 						finished = true;
 						continue;
 					}
+<<<<<<< HEAD
 					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
+=======
+					if (anyReplaced(level, inFlightChunk.retainedChunks())) {
+						skipped++;
+						finished = true;
+						continue;
+					}
+					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
+>>>>>>> 0776763 (Wire deferred claim release, reject replaced chunks before relight, stricter block_states check)
 
 					inFlightChunk.startRelight(relightChunk(level, levelChunk));
 					startedThisTick++;
@@ -142,6 +151,11 @@ public final class ChunkLightWorker {
 				}
 
 				ChunkAccess relitChunk = inFlightChunk.relightFuture().join();
+				if (anyReplaced(level, inFlightChunk.retainedChunks())) {
+					skipped++;
+					finished = true;
+					continue;
+				}
 				if (relitChunk instanceof LevelChunk levelChunk) {
 					levelChunk.markUnsaved();
 				}
@@ -187,6 +201,11 @@ public final class ChunkLightWorker {
 	private void releaseChunk(ServerLevel level, ChunkPos chunkPos, InFlightChunk inFlightChunk) {
 		inFlightChunk.cancelPendingWork();
 		if (inFlightChunk.loadStarted()) {
+			// Keep the no-generation veto until vanilla load work has settled (cancelling our wrapper does not stop it).
+			ChunkMap chunkMap = level.getChunkSource().chunkMap;
+			List<ChunkPos> claimed = chunkArea(chunkPos, PREFLIGHT_RADIUS);
+			inFlightChunk.settledFuture.orTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+				.whenComplete((ignored, error) -> LucNoGeneration.release(chunkMap, claimed));
 			releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
 			releaseLightData(level, inFlightChunk.retainedChunks());
 		}
@@ -266,13 +285,13 @@ public final class ChunkLightWorker {
 		}
 	}
 
-	private CompletableFuture<?> loadRetainedArea(ServerLevel level, List<ChunkPos> chunkPositions) {
+	private List<CompletableFuture<?>> loadRetainedArea(ServerLevel level, List<ChunkPos> chunkPositions) {
 		List<CompletableFuture<?>> loadFutures = new ArrayList<>(chunkPositions.size());
 		for (ChunkPos chunkPos : chunkPositions) {
 			retainTicket(level, chunkPos);
 			loadFutures.add(level.getChunkSource().addTicketAndLoadWithRadius(LOAD_TICKET_TYPE, chunkPos, LOAD_TICKET_RADIUS));
 		}
-		return CompletableFuture.allOf(loadFutures.toArray(CompletableFuture[]::new));
+		return loadFutures;
 	}
 
 	private void retainTicket(ServerLevel level, ChunkPos chunkPos) {
@@ -365,6 +384,15 @@ public final class ChunkLightWorker {
 		return true;
 	}
 
+	private boolean anyReplaced(ServerLevel level, List<ChunkPos> area) {
+		for (ChunkPos pos : area) {
+			if (!shouldSaveChunk(level, pos)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private boolean shouldSaveChunk(ServerLevel level, ChunkPos chunkPos) {
 		return !LucNoGeneration.wasReplaced(level.getChunkSource().chunkMap, chunkPos); // never overwrite disk data with a vanilla replacement chunk
 	}
@@ -445,6 +473,7 @@ public final class ChunkLightWorker {
 		private final CompletableFuture<Preflight> preflightFuture;
 		private CompletableFuture<?> loadFuture;
 		private CompletableFuture<ChunkAccess> relightFuture;
+		private CompletableFuture<?> settledFuture;
 
 		private InFlightChunk(ChunkPos chunkPos, List<ChunkPos> retainedChunks, CompletableFuture<Preflight> preflightFuture) {
 			this.chunkPos = chunkPos;
@@ -476,8 +505,10 @@ public final class ChunkLightWorker {
 			return loadFuture != null;
 		}
 
-		private void startLoad(CompletableFuture<?> loadFuture) {
-			this.loadFuture = loadFuture;
+		private void startLoad(List<CompletableFuture<?>> loads) {
+			this.loadFuture = CompletableFuture.allOf(loads.toArray(CompletableFuture[]::new));
+			// Separate from loadFuture (which we cancel): completes only once vanilla load work has really settled.
+			this.settledFuture = CompletableFuture.allOf(loads.stream().map(load -> load.handle((value, error) -> null)).toArray(CompletableFuture[]::new));
 		}
 
 		private boolean loadReady() {
