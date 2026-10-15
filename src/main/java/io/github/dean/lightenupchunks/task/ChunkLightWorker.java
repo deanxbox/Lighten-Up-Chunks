@@ -47,6 +47,8 @@ public final class ChunkLightWorker {
 	private final Queue<PersistedLightInspector> inspectors = new ConcurrentLinkedQueue<>();
 	private final Map<ChunkPos, Integer> retainedLightDataCounts = new HashMap<>();
 	private final Map<ChunkPos, Integer> retainedTicketCounts = new HashMap<>();
+	// Vanilla FULL loading depends on neighbours up to 2 chunks out; all must already be FULL on disk or it would generate them.
+	private static final int PREFLIGHT_RADIUS = 2;
 	private static final int FULL_CACHE_LIMIT = 65536;
 	private final Map<String, Boolean> fullCache = new ConcurrentHashMap<>();
 	private final ThreadLocal<PersistedLightInspector> inspectorLocal = ThreadLocal.withInitial(() -> {
@@ -70,7 +72,7 @@ public final class ChunkLightWorker {
 
 			List<ChunkPos> retainedChunks = ticketArea(chunkPos);
 			// Disk preflight first: nothing is ticketed (and so nothing can be generated) until every chunk is verified FULL.
-			inFlightChunks.put(chunkPos, new InFlightChunk(chunkPos, retainedChunks, createPreflightFuture(level, task, chunkPos, retainedChunks)));
+			inFlightChunks.put(chunkPos, new InFlightChunk(chunkPos, retainedChunks, createPreflightFuture(level, task, chunkPos, chunkArea(chunkPos, PREFLIGHT_RADIUS))));
 		}
 		return skipped;
 	}
