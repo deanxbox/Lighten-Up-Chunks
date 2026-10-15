@@ -15,5 +15,6 @@ public abstract class ChunkMapMixin {
 	@Inject(method = "createEmptyChunk", at = @At("HEAD"))
 	private void lightenupchunks$flagReplacement(ChunkPos pos, CallbackInfoReturnable<ChunkAccess> cir) {
 		LucNoGeneration.vetoGeneration(this, pos);
+		LucNoGeneration.markReplaced(this, pos);
 	}
 }
