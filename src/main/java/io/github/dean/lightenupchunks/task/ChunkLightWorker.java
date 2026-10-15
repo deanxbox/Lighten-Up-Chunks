@@ -282,12 +282,11 @@ public final class ChunkLightWorker {
 		}
 		return false;
 	}
+
 	public void clearDirty() {
 		dirtyChunks.clear();
 		relitCentres.clear();
 	}
-
-	/** True while a chunk within one chunk of pos can still change pos
 
 	/** force: pause/cancel/shutdown. Saves everything stable and drops (without saving) chunks next to a half-finished relight. */
 	public List<ChunkPos> flushDirty(ServerLevel level, Map<ChunkPos, InFlightChunk> inFlightChunks, boolean force) {
@@ -337,6 +336,7 @@ public final class ChunkLightWorker {
 		}
 		return dropped;
 	}
+
 	private void broadcastRelitChunk(ServerLevel level, LevelChunk chunk) {
 		for (ServerPlayer player : level.players()) {
 			if (player.getChunkTrackingView().contains(chunk.getPos())) {
