@@ -15,6 +15,7 @@ import net.minecraft.world.level.ChunkPos;
  */
 public final class LucNoGeneration {
 	private static final Map<Object, Map<Long, AtomicInteger>> CLAIMED = new ConcurrentHashMap<>();
+	private static final Map<Object, Set<Long>> REPLACED = java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 	private static final Map<Object, Set<Long>> BLOCKED = new ConcurrentHashMap<>();
 
 	private LucNoGeneration() {
@@ -61,6 +62,16 @@ public final class LucNoGeneration {
 		return true;
 	}
 
+	/** Records that vanilla swapped unreadable data for an empty chunk; tracked for every position, claimed or not. */
+	public static void markReplaced(Object chunkMap, ChunkPos pos) {
+		REPLACED.computeIfAbsent(chunkMap, ignored -> ConcurrentHashMap.newKeySet()).add(key(pos));
+	}
+
+	public static boolean wasReplaced(Object chunkMap, ChunkPos pos) {
+		Set<Long> replaced = REPLACED.get(chunkMap);
+		return replaced != null && replaced.contains(key(pos));
+	}
+
 	public static boolean anyBlocked(Object chunkMap, Collection<ChunkPos> positions) {
 		Set<Long> blocked = BLOCKED.get(chunkMap);
 		if (blocked == null || blocked.isEmpty()) {
@@ -72,5 +83,14 @@ public final class LucNoGeneration {
 			}
 		}
 		return false;
+	}
+
+	// Drop per-ChunkMap state once nothing is claimed so closed dimensions are not retained.
+	static void cleanup(Object chunkMap) {
+		Map<Long, AtomicInteger> claims = CLAIMED.get(chunkMap);
+		if (claims != null && claims.isEmpty()) {
+			CLAIMED.remove(chunkMap, claims);
+			BLOCKED.remove(chunkMap);
+		}
 	}
 }
