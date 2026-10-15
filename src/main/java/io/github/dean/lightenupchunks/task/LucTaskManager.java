@@ -607,7 +607,7 @@ public final class LucTaskManager {
 	}
 
 	private void requeueInFlightChunks(LightTask task) {
-		if (task == null || inFlightChunks.isEmpty()) {
+		if (task == null || (inFlightChunks.isEmpty() && !worker.hasDirty())) {
 			return;
 		}
 
