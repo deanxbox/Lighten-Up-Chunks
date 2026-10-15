@@ -10,6 +10,10 @@ import io.github.dean.lightenupchunks.scanner.RegionFileProbe;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import net.minecraft.nbt.CompoundTag;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -43,7 +47,8 @@ public final class ChunkLightWorker {
 	private final Queue<PersistedLightInspector> inspectors = new ConcurrentLinkedQueue<>();
 	private final Map<ChunkPos, Integer> retainedLightDataCounts = new HashMap<>();
 	private final Map<ChunkPos, Integer> retainedTicketCounts = new HashMap<>();
-	private final RegionFileProbe regionFileProbe = new RegionFileProbe();
+	private static final int FULL_CACHE_LIMIT = 65536;
+	private final Map<String, Boolean> fullCache = new ConcurrentHashMap<>();
 	private final ThreadLocal<PersistedLightInspector> inspectorLocal = ThreadLocal.withInitial(() -> {
 		PersistedLightInspector inspector = new PersistedLightInspector();
 		inspectors.add(inspector);
@@ -64,13 +69,8 @@ public final class ChunkLightWorker {
 			}
 
 			List<ChunkPos> retainedChunks = ticketArea(chunkPos);
-			if (!allChunksExist(level, retainedChunks)) {
-				skipped++;
-				continue;
-			}
-			retainLightData(level, retainedChunks);
-			CompletableFuture<?> loadFuture = loadRetainedArea(level, retainedChunks);
-			inFlightChunks.put(chunkPos, new InFlightChunk(chunkPos, retainedChunks, loadFuture, createInspectionFuture(level, task, chunkPos)));
+			// Disk preflight first: nothing is ticketed (and so nothing can be generated) until every chunk is verified FULL.
+			inFlightChunks.put(chunkPos, new InFlightChunk(chunkPos, retainedChunks, createPreflightFuture(level, task, chunkPos, retainedChunks)));
 		}
 		return skipped;
 	}
@@ -81,6 +81,7 @@ public final class ChunkLightWorker {
 		List<FailureRecord> failures = new ArrayList<>();
 		int maxRelightsStartedThisTick = maxRelightsStartedThisTick(level);
 		int startedThisTick = 0;
+		Set<ChunkPos> savedThisTick = new HashSet<>();
 		Iterator<Map.Entry<ChunkPos, InFlightChunk>> iterator = inFlightChunks.entrySet().iterator();
 		while (iterator.hasNext()) {
 			Map.Entry<ChunkPos, InFlightChunk> entry = iterator.next();
@@ -90,26 +91,35 @@ public final class ChunkLightWorker {
 
 			try {
 				if (!inFlightChunk.hasRelightFuture()) {
+					if (!inFlightChunk.loadStarted()) {
+						if (!inFlightChunk.preflightDone()) {
+							continue;
+						}
+						Preflight verdict = inFlightChunk.preflight();
+						if (verdict != Preflight.RELIGHT) {
+							skipped++;
+							finished = true;
+							continue;
+						}
+						retainLightData(level, inFlightChunk.retainedChunks());
+						inFlightChunk.startLoad(loadRetainedArea(level, inFlightChunk.retainedChunks()));
+						continue;
+					}
 					if (!inFlightChunk.loadReady()) {
 						continue;
 					}
 					inFlightChunk.awaitLoaded();
-					if (!inFlightChunk.shouldRelightReady()) {
-						continue;
-					}
-					if (!inFlightChunk.shouldRelight()) {
-						skipped++;
-						finished = true;
-						continue;
-					}
 					if (startedThisTick >= maxRelightsStartedThisTick) {
 						continue;
 					}
 
-					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
-					if (levelChunk == null) {
+					if (!allLoaded(level, inFlightChunk.retainedChunks())) {
+						// Safety net: never relight or save an area that did not load as complete chunks.
+						skipped++;
+						finished = true;
 						continue;
 					}
+					LevelChunk levelChunk = level.getChunkSource().getChunkNow(chunkPos.x, chunkPos.z);
 
 					inFlightChunk.startRelight(relightChunk(level, levelChunk));
 					startedThisTick++;
@@ -124,7 +134,7 @@ public final class ChunkLightWorker {
 				if (relitChunk instanceof LevelChunk levelChunk) {
 					levelChunk.markUnsaved();
 				}
-				saveRelitArea(level, inFlightChunk.retainedChunks());
+				saveRelitArea(level, inFlightChunk.retainedChunks(), savedThisTick);
 				relit++;
 				finished = true;
 			} catch (CompletionException exception) {
@@ -165,9 +175,10 @@ public final class ChunkLightWorker {
 
 	private void releaseChunk(ServerLevel level, ChunkPos chunkPos, InFlightChunk inFlightChunk) {
 		inFlightChunk.cancelPendingWork();
-		preventNewChunkWrites(level, chunkPos);
-		releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
-		releaseLightData(level, inFlightChunk.retainedChunks());
+		if (inFlightChunk.loadStarted()) {
+			releaseRetainedAreaTickets(level, inFlightChunk.retainedChunks());
+			releaseLightData(level, inFlightChunk.retainedChunks());
+		}
 	}
 
 	private CompletableFuture<ChunkAccess> relightChunk(ServerLevel level, LevelChunk chunk) {
@@ -202,11 +213,11 @@ public final class ChunkLightWorker {
 			.thenApply(relitChunk -> chunk);
 	}
 
-	private void saveRelitArea(ServerLevel level, List<ChunkPos> retainedChunks) {
+	private void saveRelitArea(ServerLevel level, List<ChunkPos> retainedChunks, Set<ChunkPos> savedThisTick) {
 		ServerChunkCache chunkSource = level.getChunkSource();
 		ChunkMapInvoker chunkMap = (ChunkMapInvoker) chunkSource.chunkMap;
 		for (ChunkPos retainedChunkPos : retainedChunks) {
-			if (!shouldSaveChunk(level, retainedChunkPos)) {
+			if (!savedThisTick.add(retainedChunkPos) || !shouldSaveChunk(level, retainedChunkPos)) {
 				continue;
 			}
 			LevelChunk retainedChunk = chunkSource.getChunkNow(retainedChunkPos.x, retainedChunkPos.z);
@@ -293,84 +304,59 @@ public final class ChunkLightWorker {
 		}
 	}
 
-	private CompletableFuture<Boolean> createInspectionFuture(ServerLevel level, LightTask task, ChunkPos chunkPos) {
-		if (!task.inspectMissingLightOnly()) {
-			return null;
-		}
+	private enum Preflight { RELIGHT, SKIP }
 
+	/**
+	 * Runs off-thread before any ticket is added. Every chunk in the area must be saved as minecraft:full;
+	 * a partial chunk would be generated further by the FULL ticket, so the whole area is skipped instead.
+	 */
+	private CompletableFuture<Preflight> createPreflightFuture(ServerLevel level, LightTask task, ChunkPos chunkPos, List<ChunkPos> area) {
+		boolean missingOnly = task.inspectMissingLightOnly();
+		String dimension = LucDimensions.asString(level);
 		return CompletableFuture.supplyAsync(() -> {
+			PersistedLightInspector inspector = inspectorLocal.get();
 			try {
-				return inspectorLocal.get().chunkNeedsLighting(level, chunkPos);
-			} catch (IOException exception) {
-				LightenUpChunks.LOGGER.warn(
-					"Falling back to relighting chunk {} in {} because its saved light data could not be inspected",
-					chunkPos,
-					LucDimensions.asString(level),
-					exception
-				);
-				return true;
+				if (fullCache.size() > FULL_CACHE_LIMIT) {
+					fullCache.clear();
+				}
+				boolean needsLight = true;
+				for (ChunkPos pos : area) {
+					String key = dimension + ":" + pos.x + "," + pos.z;
+					Boolean cached = fullCache.get(key);
+					if (cached == null || (pos.equals(chunkPos) && missingOnly)) {
+						CompoundTag tag = inspector.read(level, pos);
+						cached = PersistedLightInspector.isFull(tag);
+						if (cached) {
+							fullCache.put(key, true); // only FULL is cached; partial chunks may finish generating later
+						}
+						if (pos.equals(chunkPos) && cached) {
+							needsLight = PersistedLightInspector.lacksStoredLightData(tag, level.dimensionType().hasSkyLight());
+						}
+					}
+					if (!cached) {
+						return Preflight.SKIP;
+					}
+				}
+				return missingOnly && !needsLight ? Preflight.SKIP : Preflight.RELIGHT;
+			} catch (IOException | RuntimeException exception) {
+				LightenUpChunks.LOGGER.warn("Skipping chunk {} in {}: saved data could not be verified as fully generated", chunkPos, dimension, exception);
+				return Preflight.SKIP;
 			}
 		}, inspectionExecutor);
 	}
 
-	private boolean allChunksExist(ServerLevel level, List<ChunkPos> chunkPositions) {
-		try {
-			for (ChunkPos chunkPos : chunkPositions) {
-				if (!regionFileProbe.chunkExists(level, chunkPos)) {
-					return false;
-				}
+	private boolean allLoaded(ServerLevel level, List<ChunkPos> area) {
+		for (ChunkPos pos : area) {
+			if (level.getChunkSource().getChunkNow(pos.x, pos.z) == null) {
+				return false;
 			}
-			return true;
-		} catch (IOException exception) {
-			LightenUpChunks.LOGGER.warn(
-				"Failed to inspect neighbor chunks in {}; skipping relight so no new chunks are written",
-				LucDimensions.asString(level),
-				exception
-			);
-			return false;
 		}
+		return true;
 	}
 
 	private boolean shouldSaveChunk(ServerLevel level, ChunkPos chunkPos) {
-		try {
-			return regionFileProbe.chunkExists(level, chunkPos);
-		} catch (IOException exception) {
-			LightenUpChunks.LOGGER.warn(
-				"Failed to verify that chunk {} in {} existed on disk; skipping save to avoid writing a new chunk",
-				chunkPos,
-				LucDimensions.asString(level),
-				exception
-			);
-			return false;
-		}
+		return true; // The whole area was verified FULL on disk and loaded before relighting.
 	}
-
-	private void preventNewChunkWrites(ServerLevel level, ChunkPos centerChunkPos) {
-		for (ChunkPos chunkPos : chunkArea(centerChunkPos, NO_SAVE_GUARD_RADIUS)) {
-			if (chunkExistedOnDisk(level, chunkPos)) {
-				continue;
-			}
-			ChunkAccess loadedChunk = level.getChunkSource().getChunk(chunkPos.x, chunkPos.z, ChunkStatus.EMPTY, false);
-			if (loadedChunk != null && loadedChunk.isUnsaved()) {
-				((ChunkAccessAccessor) loadedChunk).lightenupchunks$setUnsaved(false);
-			}
-		}
-	}
-
-	private boolean chunkExistedOnDisk(ServerLevel level, ChunkPos chunkPos) {
-		try {
-			return regionFileProbe.chunkExists(level, chunkPos);
-		} catch (IOException exception) {
-			LightenUpChunks.LOGGER.warn(
-				"Failed to verify whether chunk {} in {} existed on disk; treating it as non-persistent to avoid writing a new chunk",
-				chunkPos,
-				LucDimensions.asString(level),
-				exception
-			);
-			return false;
-		}
-	}
-
 	private List<ChunkPos> chunkArea(ChunkPos centerChunkPos, int radius) {
 		List<ChunkPos> chunkPositions = new ArrayList<>((radius * 2 + 1) * (radius * 2 + 1));
 		for (int dx = -radius; dx <= radius; dx++) {
@@ -445,20 +431,14 @@ public final class ChunkLightWorker {
 	public static final class InFlightChunk {
 		private final ChunkPos chunkPos;
 		private final List<ChunkPos> retainedChunks;
-		private final CompletableFuture<?> loadFuture;
-		private final CompletableFuture<Boolean> inspectionFuture;
+		private final CompletableFuture<Preflight> preflightFuture;
+		private CompletableFuture<?> loadFuture;
 		private CompletableFuture<ChunkAccess> relightFuture;
 
-		private InFlightChunk(
-			ChunkPos chunkPos,
-			List<ChunkPos> retainedChunks,
-			CompletableFuture<?> loadFuture,
-			CompletableFuture<Boolean> inspectionFuture
-		) {
+		private InFlightChunk(ChunkPos chunkPos, List<ChunkPos> retainedChunks, CompletableFuture<Preflight> preflightFuture) {
 			this.chunkPos = chunkPos;
 			this.retainedChunks = retainedChunks;
-			this.loadFuture = loadFuture;
-			this.inspectionFuture = inspectionFuture;
+			this.preflightFuture = preflightFuture;
 		}
 
 		public ChunkPos chunkPos() {
@@ -467,6 +447,22 @@ public final class ChunkLightWorker {
 
 		public List<ChunkPos> retainedChunks() {
 			return retainedChunks;
+		}
+
+		private boolean preflightDone() {
+			return preflightFuture.isDone();
+		}
+
+		private Preflight preflight() {
+			return preflightFuture.join();
+		}
+
+		private boolean loadStarted() {
+			return loadFuture != null;
+		}
+
+		private void startLoad(CompletableFuture<?> loadFuture) {
+			this.loadFuture = loadFuture;
 		}
 
 		private boolean loadReady() {
@@ -489,18 +485,10 @@ public final class ChunkLightWorker {
 			this.relightFuture = relightFuture;
 		}
 
-		private boolean shouldRelightReady() {
-			return inspectionFuture == null || inspectionFuture.isDone();
-		}
-
-		private boolean shouldRelight() {
-			return inspectionFuture == null || inspectionFuture.join();
-		}
-
 		private void cancelPendingWork() {
-			loadFuture.cancel(true);
-			if (inspectionFuture != null) {
-				inspectionFuture.cancel(true);
+			preflightFuture.cancel(true);
+			if (loadFuture != null) {
+				loadFuture.cancel(true);
 			}
 			if (relightFuture != null) {
 				relightFuture.cancel(true);
