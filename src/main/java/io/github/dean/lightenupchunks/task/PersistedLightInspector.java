@@ -90,7 +90,18 @@ final class PersistedLightInspector implements AutoCloseable {
 
 	/** Only fully generated chunks may be loaded; anything else would make vanilla finish generating it. */
 	static boolean isFull(CompoundTag chunkTag) {
-		return chunkTag != null && "minecraft:full".equals(chunkTag.getStringOr("Status", ""));
+		if (chunkTag == null || !"minecraft:full".equals(chunkTag.getStringOr("Status", ""))) {
+			return false;
+		}
+		// Vanilla replaces undeserialisable chunks with generated ones, so reject obviously corrupt block storage here.
+		ListTag sections = chunkTag.getListOrEmpty("sections");
+		for (int index = 0; index < sections.size(); index++) {
+			CompoundTag blockStates = sections.getCompoundOrEmpty(index).getCompoundOrEmpty("block_states");
+			if (blockStates.getListOrEmpty("palette").size() > 1 && !blockStates.contains("data")) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	static boolean lacksStoredLightData(CompoundTag chunkTag, boolean hasSkyLight) {
