@@ -4,6 +4,7 @@
 	"compatibilityLevel": "JAVA_21",
 	"mixins": [
 		"accessor.ChunkAccessAccessor",
+		"accessor.LevelChunkAccessor",
 		"accessor.ChunkMapInvoker",
 		"ChunkGenerationTaskMixin",
 		"ChunkMapMixin"

@@ -7,6 +7,7 @@ import io.github.dean.lightenupchunks.LucNoGeneration;
 import net.minecraft.server.level.ChunkMap;
 import io.github.dean.lightenupchunks.VoxyCompat;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkAccessAccessor;
+import io.github.dean.lightenupchunks.mixin.accessor.LevelChunkAccessor;
 import io.github.dean.lightenupchunks.mixin.accessor.ChunkMapInvoker;
 import io.github.dean.lightenupchunks.scanner.RegionFileProbe;
 import java.io.IOException;
@@ -194,7 +195,16 @@ public final class ChunkLightWorker {
 		inFlightChunks.clear();
 	}
 
+	private record SuppressedListener(LevelChunk chunk, LevelChunk.UnsavedListener listener) {
+	}
+
+	private final Map<ChunkPos, SuppressedListener> suppressedListeners = new HashMap<>();
+
 	private void releaseChunk(ServerLevel level, ChunkPos chunkPos, InFlightChunk inFlightChunk) {
+		SuppressedListener suppressed = suppressedListeners.remove(chunkPos);
+		if (suppressed != null && suppressed.listener() != null) {
+			suppressed.chunk().setUnsavedListener(suppressed.listener());
+		}
 		inFlightChunk.cancelPendingWork();
 		if (inFlightChunk.loadStarted()) {
 			// Keep the no-generation veto until vanilla load work has settled (cancelling our wrapper does not stop it).
@@ -209,6 +219,10 @@ public final class ChunkLightWorker {
 	private CompletableFuture<ChunkAccess> relightChunk(ServerLevel level, LevelChunk chunk) {
 		ServerChunkCache chunkSource = level.getChunkSource();
 		ThreadedLevelLightEngine lightEngine = chunkSource.getLightEngine();
+		// Starlight finishes lighting on a worker thread and calls markUnsaved(); if the chunk was saved meanwhile that fires the
+		// unsaved listener off-thread (C2ME throws "Async chunk modification"). Mute it for the relight; restored on the server thread.
+		suppressedListeners.put(chunk.getPos(), new SuppressedListener(chunk, ((LevelChunkAccessor) chunk).lightenupchunks$getUnsavedListener()));
+		chunk.setUnsavedListener(pos -> { });
 		ImposterProtoChunk protoChunk = new ImposterProtoChunk(chunk, true);
 		ChunkPos chunkPos = protoChunk.getPos();
 
