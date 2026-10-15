@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.nbt.CompoundTag;
@@ -87,7 +88,6 @@ public final class ChunkLightWorker {
 		List<FailureRecord> failures = new ArrayList<>();
 		int maxRelightsStartedThisTick = maxRelightsStartedThisTick(level);
 		int startedThisTick = 0;
-		Set<ChunkPos> savedThisTick = new HashSet<>();
 		Iterator<Map.Entry<ChunkPos, InFlightChunk>> iterator = inFlightChunks.entrySet().iterator();
 		while (iterator.hasNext()) {
 			Map.Entry<ChunkPos, InFlightChunk> entry = iterator.next();
@@ -111,7 +111,7 @@ public final class ChunkLightWorker {
 						retainLightData(level, inFlightChunk.retainedChunks());
 						LucNoGeneration.claim(level.getChunkSource().chunkMap, chunkArea(chunkPos, PREFLIGHT_RADIUS));
 						inFlightChunk.startLoad(loadRetainedArea(level, inFlightChunk.retainedChunks()));
-						continue;
+						// no continue: a load that is already complete may relight in this same pass
 					}
 					if (LucNoGeneration.anyBlocked(level.getChunkSource().chunkMap, inFlightChunk.retainedChunks())) {
 						// Vanilla wanted to generate part of this area; the veto kept disk data untouched.
@@ -158,7 +158,7 @@ public final class ChunkLightWorker {
 				if (relitChunk instanceof LevelChunk levelChunk) {
 					levelChunk.markUnsaved();
 				}
-				saveRelitArea(level, inFlightChunk.retainedChunks(), savedThisTick, inFlightChunks);
+				markDirty(level, inFlightChunk.retainedChunks(), chunkPos);
 				relit++;
 				finished = true;
 			} catch (CompletionException exception) {
@@ -187,6 +187,7 @@ public final class ChunkLightWorker {
 				}
 			}
 		}
+		flushDirty(level, inFlightChunks, false);
 		return new ProcessResult(relit, skipped, failures);
 	}
 
@@ -254,33 +255,86 @@ public final class ChunkLightWorker {
 			.thenApply(relitChunk -> chunk);
 	}
 
-	private void saveRelitArea(ServerLevel level, List<ChunkPos> retainedChunks, Set<ChunkPos> savedThisTick, Map<ChunkPos, InFlightChunk> inFlightChunks) {
+	// Chunks whose light changed. Each is saved/broadcast/ingested once, when no in-flight chunk within one chunk of it can still
+	// change its light, instead of once per overlapping 3x3 area. A ticket reference is held until the save so it cannot unload unsaved.
+	private final Set<ChunkPos> dirtyChunks = new LinkedHashSet<>();
+	private final Set<ChunkPos> relitCentres = new HashSet<>(); // dirty chunks that were relit themselves (vs only neighbours)
+
+	private void markDirty(ServerLevel level, List<ChunkPos> area, ChunkPos centre) {
+		relitCentres.add(centre);
+		for (ChunkPos pos : area) {
+			if (dirtyChunks.add(pos)) {
+				retainTicket(level, pos);
+				retainLightData(level, List.of(pos)); // keep its light until the delayed save
+			}
+		}
+	}
+
+	/** True while a chunk within one chunk of pos can still change its light (or, unless force, has not even started). */
+	static boolean isBusy(ChunkPos pos, java.util.function.Predicate<ChunkPos> inFlight, java.util.function.Predicate<ChunkPos> midRelight, boolean force) {
+		for (int dx = -1; dx <= 1; dx++) {
+			for (int dz = -1; dz <= 1; dz++) {
+				ChunkPos n = new ChunkPos(pos.x + dx, pos.z + dz);
+				if (inFlight.test(n) && (!force || midRelight.test(n))) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	public void clearDirty() {
+		dirtyChunks.clear();
+		relitCentres.clear();
+	}
+
+	/** force: pause/cancel/shutdown. Saves everything stable and drops (without saving) chunks next to a half-finished relight. */
+	public List<ChunkPos> flushDirty(ServerLevel level, Map<ChunkPos, InFlightChunk> inFlightChunks, boolean force) {
+		List<ChunkPos> dropped = new ArrayList<>();
+		if (dirtyChunks.isEmpty()) {
+			return dropped;
+		}
 		ServerChunkCache chunkSource = level.getChunkSource();
 		ChunkMapInvoker chunkMap = (ChunkMapInvoker) chunkSource.chunkMap;
-		for (ChunkPos retainedChunkPos : retainedChunks) {
-			// A neighbour mid-relight has its light cleared; saving/ingesting it now would store dark light. It saves itself when done.
-			InFlightChunk neighbour = inFlightChunks.get(retainedChunkPos);
-			if (neighbour != null && neighbour.hasRelightFuture() && !neighbour.relightFuture().isDone()) {
+		Iterator<ChunkPos> iterator = dirtyChunks.iterator();
+		while (iterator.hasNext()) {
+			ChunkPos pos = iterator.next();
+			boolean busy = isBusy(
+				pos,
+				n -> inFlightChunks.containsKey(n),
+				n -> {
+					InFlightChunk c = inFlightChunks.get(n);
+					return c != null && c.hasRelightFuture() && !c.relightFuture().isDone();
+				},
+				force
+			);
+			if (busy && !force) {
 				continue;
 			}
-			if (!savedThisTick.add(retainedChunkPos) || !shouldSaveChunk(level, retainedChunkPos)) {
-				continue;
+			iterator.remove();
+			if (busy && relitCentres.remove(pos)) {
+				dropped.add(pos); // relit but unsaveable right now: give it back to the task so it is not lost
+			} else if (!busy) {
+				relitCentres.remove(pos);
 			}
-			LevelChunk retainedChunk = chunkSource.getChunkNow(retainedChunkPos.x, retainedChunkPos.z);
-			if (retainedChunk != null) {
-				retainedChunk.markUnsaved();
+			LevelChunk chunk = busy || !shouldSaveChunk(level, pos) ? null : chunkSource.getChunkNow(pos.x, pos.z);
+			if (chunk != null) {
+				chunk.markUnsaved();
 				long t0 = System.nanoTime();
-				chunkMap.lightenupchunks$saveChunk(retainedChunk);
+				chunkMap.lightenupchunks$saveChunk(chunk);
 				long t1 = System.nanoTime();
-				broadcastRelitChunk(level, retainedChunk);
+				broadcastRelitChunk(level, chunk);
 				long t2 = System.nanoTime();
-				VoxyCompat.notifyChunkRelit(level, retainedChunk);
+				VoxyCompat.notifyChunkRelit(level, chunk);
 				LucTimings.SAVE.add(t1 - t0);
 				LucTimings.SAVES.increment();
 				LucTimings.BROADCAST.add(t2 - t1);
 				LucTimings.VOXY.add(System.nanoTime() - t2);
 			}
+			releaseRetainedAreaTickets(level, List.of(pos));
+			releaseLightData(level, List.of(pos));
 		}
+		return dropped;
 	}
 
 	private void broadcastRelitChunk(ServerLevel level, LevelChunk chunk) {
